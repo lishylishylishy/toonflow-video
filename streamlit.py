@@ -177,74 +177,171 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
     ws_script.clear()
     ws_script.update(range_name='A1', values=rows_script)
 
-
 # ==============================================================================
-# 🧩 【四、 Toonflow 节点工程转换器 (抓表格 -> 生成 JSON)】
+# 🧩 【四、 Toonflow 节点工程转换器 (严格对齐 Toonflow 模板结构)】
 # ==============================================================================
 
 def create_node_pair(label, text_content, gen_type, x, y):
     text_id = str(uuid.uuid4())
     gen_id = str(uuid.uuid4())
+    
+    # 1. 文本节点（完全对齐模板结构）
     text_node = {
-        "id": text_id, "type": "remote-textNode", "position": {"x": x, "y": y},
+        "id": text_id,
+        "type": "remote-textNode",
+        "initialized": False,
+        "position": {"x": x, "y": y},
         "data": {
-            "label": label, "promptModel": [[{"type": "Write", "text": text_content}]],
-            "handles": [{"id": "text", "type": "source", "dataType": "STRING", "label": "文本输出"}]
+            "label": label,
+            "handles": [
+                {"id": "in", "type": "target", "dataType": ["VIDEO", "IMAGE", "STRING", "FILE"], "label": "视频、图片、文本、文件输入"},
+                {"id": "text", "type": "source", "dataType": "STRING", "label": "文本输出"}
+            ],
+            "outputs": {},
+            "model": "[\"deepSeek\",\"deepseek-flash\"]",
+            "promptModel": [[{"type": "Write", "text": text_content}]]
         }
     }
-    gen_node = {
-        "id": gen_id, "type": f"remote-{gen_type}GenerationNode", "position": {"x": x + 300, "y": y},
-        "data": {
-            "label": label, "handles": [{"id": "in", "type": "target", "dataType": ["STRING"]}]
+
+    # 2. 生成节点（根据 image / audio 补齐各自的默认配置字段）
+    if gen_type == "image":
+        gen_node = {
+            "id": gen_id,
+            "type": "remote-imageGenerationNode",
+            "initialized": False,
+            "position": {"x": x + 360, "y": y},
+            "data": {
+                "label": label,
+                "prompt": "",
+                "promptModel": [[{"type": "Write", "text": ""}]],
+                "inpaintPrompt": "",
+                "inpaintPromptModel": [],
+                "model": "[\"modelscopeImageProvider\",\"Tongyi-MAI/Z-Image-Turbo\"]",
+                "size": "2K",
+                "ratio": "16:9",
+                "other": {},
+                "handles": [
+                    {"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "图片、文本输入"},
+                    {"id": "image", "type": "source", "dataType": "IMAGE", "label": "图片输出"}
+                ],
+                "outputs": {}
+            }
         }
-    }
+    else:
+        gen_node = {
+            "id": gen_id,
+            "type": "remote-audioGenerationNode",
+            "initialized": False,
+            "position": {"x": x + 360, "y": y},
+            "data": {
+                "label": label,
+                "prompt": "",
+                "promptModel": [[{"type": "Write", "text": ""}]],
+                "model": "",
+                "language": "zh-CN",
+                "sampleRate": 24000,
+                "format": "wav",
+                "other": {},
+                "handles": [
+                    {"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "图片或音频限1个，文本不限"},
+                    {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "音频输出"}
+                ],
+                "outputs": {}
+            }
+        }
+
+    # 3. 连线（补齐模板中的交互与坐标属性）
     edge = {
-        "id": f"vueflow__edge-{text_id}text-{gen_id}in", "type": "simplebezier",
-        "source": text_id, "target": gen_id, "sourceHandle": "text", "targetHandle": "in"
+        "id": f"vueflow__edge-{text_id}text-{gen_id}in",
+        "type": "simplebezier",
+        "source": text_id,
+        "target": gen_id,
+        "sourceHandle": "text",
+        "targetHandle": "in",
+        "updatable": False,
+        "selectable": False,
+        "focusable": False,
+        "data": {},
+        "label": "",
+        "interactionWidth": 40,
+        "animated": False
     }
     return text_node, gen_node, edge
 
+
 def generate_toonflow_json():
-    """抓取 Google 表格，生成 Toonflow 支持的 JSON 项目文件"""
+    """抓取 Google 表格，生成完全兼容 Toonflow 的 JSON 项目文件"""
     gcp_key_str = get_secret("GCP_SA_KEY", "")
-    creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+    creds = Credentials.from_service_account_info(
+        json.loads(gcp_key_str),
+        scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    )
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(SHEET_EDIT_URL)
     
     settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records(head=2)
     script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
     
-    project = {"toonflowCanvas": True, "nodes": [], "edges": []}
-    current_y = -1000
+    # 根级必须包含 viewport 字段，否则 Toonflow 画布无法初始化
+    project = {
+        "toonflowCanvas": True,
+        "nodes": [],
+        "edges": [],
+        "viewport": {
+            "x": 450,
+            "y": 450,
+            "zoom": 0.5
+        }
+    }
+    current_y = -700
     
-    # 1. 生成全局资产节点 (Settings)
+    # 1. 生成全局资产节点 (Settings) -> 标签格式对齐模板：类型-名称-场景X
     for row in settings_records:
-        name = row.get("名称", "")
-        if not name: continue
+        item_type = str(row.get("类型", "")).strip()
+        name = str(row.get("名称", "")).strip()
+        if not name:
+            continue
+        prefix = f"{item_type}-{name}" if item_type else name
         for i in range(1, MAX_SCENE_COLUMNS + 1):
             scene_key = f"场景{i}"
-            prompt = row.get(scene_key, "")
+            prompt = str(row.get(scene_key, "")).strip()
             if prompt:
-                t, g, e = create_node_pair(f"{name}-{scene_key}", prompt, "image", x=0, y=current_y)
+                t, g, e = create_node_pair(f"{prefix}-{scene_key}", prompt, "image", x=-280, y=current_y)
                 project["nodes"].extend([t, g])
                 project["edges"].append(e)
-                current_y += 200
+                current_y += 220
                 
-    current_y += 500
+    current_y = 30
     
-    # 2. 生成配音节点 (Script)
+    # 2. 生成分镜资产节点 (Script) -> 包含背景图、配音、背景音
     for index, row in enumerate(script_records):
-        fragment_id = f"片段{row.get('序号', index+1)}"
-        if row.get("配音文字"):
-            t, g, e = create_node_pair(f"{fragment_id}-配音-{row.get('配音人物','')}", row.get("配音文字"), "audio", x=600, y=current_y)
+        fragment_id = f"片段{row.get('序号', index + 1)}"
+        
+        # 背景图节点
+        bg_img = str(row.get("背景图", "")).strip()
+        if bg_img:
+            t, g, e = create_node_pair(f"{fragment_id}-背景图", bg_img, "image", x=650, y=current_y)
             project["nodes"].extend([t, g])
             project["edges"].append(e)
-            current_y += 200
-        if row.get("背景音"):
-            t, g, e = create_node_pair(f"{fragment_id}-背景音", row.get("背景音"), "audio", x=600, y=current_y)
+            current_y += 220
+            
+        # 配音节点
+        voice_text = str(row.get("配音文字", "")).strip()
+        if voice_text:
+            voice_actor = str(row.get("配音人物", "")).strip()
+            voice_label = f"{fragment_id}-配音-{voice_actor}" if voice_actor else fragment_id
+            t, g, e = create_node_pair(voice_label, voice_text, "audio", x=650, y=current_y)
             project["nodes"].extend([t, g])
             project["edges"].append(e)
-            current_y += 200
+            current_y += 220
+            
+        # 背景音节点
+        bgm_text = str(row.get("背景音", "")).strip()
+        if bgm_text:
+            t, g, e = create_node_pair(f"{fragment_id}-背景音", bgm_text, "audio", x=650, y=current_y)
+            project["nodes"].extend([t, g])
+            project["edges"].append(e)
+            current_y += 220
             
     return json.dumps(project, ensure_ascii=False, indent=2)
 

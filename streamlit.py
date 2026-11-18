@@ -77,16 +77,38 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
 
     final_prompt = f"{base_prompt}\n\n【草稿文案内容】：\n{raw_text}"
     
-    # 2. 调用 Gemini API
+# 2. 调用 Gemini API（带 503/429 自动重试与备用模型降级）
     gemini_key = get_secret("GEMINI_API_KEY", "")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
+    if not gemini_key:
+        raise ValueError("未在 Streamlit Secrets 中找到 GEMINI_API_KEY 密钥！")
+
     payload = {
         "contents": [{"parts": [{"text": final_prompt}]}],
         "generationConfig": {"response_mime_type": "application/json"}
     }
-    res = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=60)
-    if res.status_code != 200:
-        raise RuntimeError(f"模型请求失败: {res.text}")
+
+    # 优先使用你选的模型；如果连续遇到 503 拥堵，自动切换到列表里的其他模型兜底
+    candidate_models = [model_name] + [m for m in RECOMMENDED_MODELS.keys() if m != model_name]
+    res = None
+
+    for current_model in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={gemini_key}"
+        for attempt in range(3):  # 每个模型最多尝试 3 次
+            res = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=60)
+            if res.status_code == 200:
+                break
+            # 如果是 503(服务器拥堵) 或 429(触发频率限制)，等待后重试
+            if res.status_code in (429, 503):
+                time.sleep(2 * (attempt + 1))  # 依次等待 2秒、4秒、6秒
+                continue
+            # 如果是 400/403/404 等参数或密钥错误，直接抛出，不浪费时间重试
+            raise RuntimeError(f"模型 [{current_model}] 请求失败 ({res.status_code}): {res.text}")
+        
+        if res is not None and res.status_code == 200:
+            break  # 只要有一个模型成功了，立刻跳出外层循环，继续往下写表格
+
+    if res is None or res.status_code != 200:
+        raise RuntimeError(f"所有备用模型均繁忙，请稍后再试。最后报错: {res.text if res else '无响应'}")
         
     text_content = res.json()['candidates'][0]['content']['parts'][0]['text']
     

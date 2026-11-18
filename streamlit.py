@@ -147,3 +147,46 @@ def create_node_pair(label, text_content, gen_type, x, y):
     return text_node, gen_node, edge
 
 def generate_toonflow_json():
+    """抓取 Google 表格，生成 Toonflow 支持的 JSON 项目文件"""
+    gcp_key_str = get_secret("GCP_SA_KEY", "")
+    creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_url(SHEET_EDIT_URL)
+    
+    # 抓取数据 (跳过 Settings 的第一行 Prompt，从第二行表头开始读取)
+    settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records(head=2)
+    script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
+    
+    project = {"toonflowCanvas": True, "nodes": [], "edges": []}
+    current_y = -1000
+    
+    # 1. 生成全局资产节点 (Settings)
+    for row in settings_records:
+        name = row.get("名称", "")
+        if not name: continue
+        for i in range(1, MAX_SCENE_COLUMNS + 1):
+            scene_key = f"场景{i}"
+            prompt = row.get(scene_key, "")
+            if prompt:
+                t, g, e = create_node_pair(f"{name}-{scene_key}", prompt, "image", x=0, y=current_y)
+                project["nodes"].extend([t, g])
+                project["edges"].append(e)
+                current_y += 200
+                
+    current_y += 500
+    
+    # 2. 生成配音节点 (Script)
+    for index, row in enumerate(script_records):
+        fragment_id = f"片段{row.get('序号', index+1)}"
+        if row.get("配音文字"):
+            t, g, e = create_node_pair(f"{fragment_id}-配音-{row.get('配音人物','')}", row.get("配音文字"), "audio", x=600, y=current_y)
+            project["nodes"].extend([t, g])
+            project["edges"].append(e)
+            current_y += 200
+        if row.get("背景音"):
+            t, g, e = create_node_pair(f"{fragment_id}-背景音", row.get("背景音"), "audio", x=600, y=current_y)
+            project["nodes"].extend([t, g])
+            project["edges"].append(e)
+            current_y += 200
+            
+    return json.dumps(project, ensure_ascii=False, indent=2)

@@ -13,6 +13,9 @@ SHEET_EMBED_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9tt
 TAB_NAME_SETTINGS = "toonflow-story-Settings"
 TAB_NAME_SCRIPT = "toonflow-story-Script"
 
+# 本地记忆配置文件路径（用于记住你的导出目录）
+LOCAL_CONFIG_FILE = ".studio_config.json"
+
 # 根据你的表格，设定最大场景列数
 MAX_SCENE_COLUMNS = 5 
 SETTINGS_HEADERS = ["类型", "名称"] + [f"场景{i}" for i in range(1, MAX_SCENE_COLUMNS + 1)]
@@ -35,6 +38,26 @@ def get_secret(key, default=""):
     except Exception:
         pass
     return os.getenv(key, default)
+
+def load_saved_export_dir():
+    """读取上次记住的本地导出路径"""
+    default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+    try:
+        if os.path.exists(LOCAL_CONFIG_FILE):
+            with open(LOCAL_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("export_dir", default_dir)
+    except Exception:
+        pass
+    return default_dir
+
+def save_export_dir(path):
+    """永久记住本地导出路径"""
+    try:
+        with open(LOCAL_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"export_dir": path}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 # ==============================================================================
 # 🎨 【二、 Streamlit 初始化】
@@ -77,7 +100,7 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
 
     final_prompt = f"{base_prompt}\n\n【草稿文案内容】：\n{raw_text}"
     
-# 2. 调用 Gemini API（带 503/429 自动重试与备用模型降级）
+    # 2. 调用 Gemini API（带 503/429 自动重试与备用模型降级）
     gemini_key = get_secret("GEMINI_API_KEY", "")
     if not gemini_key:
         raise ValueError("未在 Streamlit Secrets 中找到 GEMINI_API_KEY 密钥！")
@@ -87,25 +110,22 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
         "generationConfig": {"response_mime_type": "application/json"}
     }
 
-    # 优先使用你选的模型；如果连续遇到 503 拥堵，自动切换到列表里的其他模型兜底
     candidate_models = [model_name] + [m for m in RECOMMENDED_MODELS.keys() if m != model_name]
     res = None
 
     for current_model in candidate_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={gemini_key}"
-        for attempt in range(3):  # 每个模型最多尝试 3 次
-            res = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=60)
+        for attempt in range(3):
+            res = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=90)
             if res.status_code == 200:
                 break
-            # 如果是 503(服务器拥堵) 或 429(触发频率限制)，等待后重试
             if res.status_code in (429, 503):
-                time.sleep(2 * (attempt + 1))  # 依次等待 2秒、4秒、6秒
+                time.sleep(2 * (attempt + 1))
                 continue
-            # 如果是 400/403/404 等参数或密钥错误，直接抛出，不浪费时间重试
             raise RuntimeError(f"模型 [{current_model}] 请求失败 ({res.status_code}): {res.text}")
         
         if res is not None and res.status_code == 200:
-            break  # 只要有一个模型成功了，立刻跳出外层循环，继续往下写表格
+            break
 
     if res is None or res.status_code != 200:
         raise RuntimeError(f"所有备用模型均繁忙，请稍后再试。最后报错: {res.text if res else '无响应'}")
@@ -118,13 +138,26 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
     clean_json = text_content[start_idx:end_idx+1] if start_idx != -1 and end_idx != -1 else text_content
     project_data = json.loads(clean_json)
 
-# 3. 提取数据（兼容 AI 可能使用的表名作为 JSON 键名）
-settings_data = project_data.get("settings") or project_data.get("toonflow-story-Settings") or []
-script_data = project_data.get("script") or project_data.get("toonflow-story-Script") or []
+    # 3. 智能提取数据（兼容大小写与完整表名）
+    settings_data = (
+        project_data.get("settings") or 
+        project_data.get("Settings") or 
+        project_data.get("toonflow-story-Settings") or 
+        []
+    )
+    script_data = (
+        project_data.get("script") or 
+        project_data.get("Script") or 
+        project_data.get("toonflow-story-Script") or 
+        []
+    )
 
-if not settings_data and not script_data:
-    raise ValueError(f"未解析出有效数据，AI 实际返回的 JSON 键名为：{list(project_data.keys())}，完整内容：\n{clean_json[:400]}")
-    # 【防崩溃补丁】给第一行补齐空白，防止长度不一致导致 gspread 报错
+    # 【防清空保护】若未解析出任何数据，立即拦截并显示 AI 真实返回的键名，绝不清空原表
+    if not settings_data and not script_data:
+        keys_found = list(project_data.keys()) if isinstance(project_data, dict) else type(project_data).__name__
+        raise ValueError(f"未解析出有效数据，AI 实际返回的 JSON 键名为：{keys_found}，内容片段：\n{clean_json[:400]}")
+
+    # 4. 写入 Settings 表
     padded_first_row = first_row + [""] * (len(SETTINGS_HEADERS) - len(first_row))
     rows_settings = [padded_first_row, SETTINGS_HEADERS]
     for item in settings_data:
@@ -132,8 +165,7 @@ if not settings_data and not script_data:
     ws_settings.clear()
     ws_settings.update(range_name='A1', values=rows_settings)
 
-    # 4. 写入 Script 表
-    script_data = project_data.get("script", [])
+    # 5. 写入 Script 表
     try:
         ws_script = sh.worksheet(TAB_NAME_SCRIPT)
     except gspread.exceptions.WorksheetNotFound:
@@ -179,7 +211,6 @@ def generate_toonflow_json():
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(SHEET_EDIT_URL)
     
-    # 抓取数据 (跳过 Settings 的第一行 Prompt，从第二行表头开始读取)
     settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records(head=2)
     script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
     
@@ -238,23 +269,48 @@ def trigger_github_workflow(tab_name, resolution):
 # 🖥️ 【六、 Streamlit UI 界面构建】
 # ==============================================================================
 
+if "export_dir" not in st.session_state:
+    st.session_state.export_dir = load_saved_export_dir()
+
 # --- 侧边栏 ---
 with st.sidebar:
     st.title("🎬 Auto-Studio")
     
-    # 功能 1：Toonflow 工程导出
+    # 功能 1：Toonflow 工程导出（支持指定并永久记住本地路径）
     st.markdown("### 📥 导出 Toonflow 工程")
-    st.caption("从表格抓取数据并转换为 Toonflow 节点文件")
-    if st.button("🔄 生成项目文件 (JSON)", use_container_width=True):
+    
+    custom_dir = st.text_input(
+        "本地保存路径（自动记住）：",
+        value=st.session_state.export_dir,
+        placeholder=r"例如: D:\Toonflow\Projects"
+    )
+    if custom_dir.strip() and custom_dir != st.session_state.export_dir:
+        st.session_state.export_dir = custom_dir.strip()
+        save_export_dir(custom_dir.strip())
+
+    if st.button("🔄 生成并保存到本地", use_container_width=True):
         with st.spinner("正在抓取表格组装节点..."):
             try:
                 tf_json = generate_toonflow_json()
-                # 动态生成按日命名的文件名，同一天下载的会自动覆盖
                 date_str = time.strftime("%Y%m%d")
                 dynamic_filename = f"Toonflow_{date_str}.json"
                 
+                target_dir = st.session_state.export_dir.strip()
+                save_export_dir(target_dir)
+                
+                # 尝试直接写入指定的本地硬盘目录（本地运行 Streamlit 时生效）
+                try:
+                    os.makedirs(target_dir, exist_ok=True)
+                    full_path = os.path.join(target_dir, dynamic_filename)
+                    with open(full_path, "w", encoding="utf-8") as f:
+                        f.write(tf_json)
+                    st.success(f"✅ 已直接覆盖保存至：\n`{full_path}`")
+                except Exception as io_err:
+                    st.warning(f"⚠️ 无法直接写入本地路径（云端部署环境下受浏览器安全限制），请点击下方按钮手动下载：{io_err}")
+
+                # 同时提供浏览器下载按钮作为双保险
                 st.download_button(
-                    label=f"✅ 点击下载 {dynamic_filename}", 
+                    label=f"⬇️ 浏览器下载 {dynamic_filename}", 
                     data=tf_json, 
                     file_name=dynamic_filename, 
                     mime="application/json", 
@@ -266,7 +322,7 @@ with st.sidebar:
                 
     st.markdown("---")
     
-    # 功能 2：云端渲染 (原有的 GitHub Actions 触发器)
+    # 功能 2：云端渲染
     st.markdown("### 🚀 云端自动渲染")
     video_resolution = st.text_input("视频分辨率", value="1920x1080")
     if st.button("▶️ Start Rendering", use_container_width=True):
@@ -286,10 +342,10 @@ with st.expander("🪄 **AI 故事拆解器 (文本草稿 ➔ 填充双表)**", 
             if not raw_draft.strip():
                 st.warning("⚠️ 请先粘贴草稿！")
             else:
-                with st.spinner(f"🤖 正在调用AI并写入表格 (保护第一行Prompt)..."):
+                with st.spinner("🤖 正在调用AI并写入表格 (保护第一行Prompt)..."):
                     try:
                         process_and_update_sheets(raw_draft, selected_model, SHEET_EDIT_URL)
-                        st.success(f"🎉 解析成功！表格已更新。")
+                        st.success("🎉 解析成功！表格已更新。")
                         time.sleep(1.5)
                         st.rerun()
                     except Exception as e:

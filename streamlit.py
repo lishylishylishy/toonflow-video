@@ -146,4 +146,4 @@ def create_node_pair(label, text_content, gen_type, x, y):
     }
     return text_node, gen_node, edge
 
-    def generate_toonflow_json():
+def generate_toonflow_json():

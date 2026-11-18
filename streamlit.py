@@ -190,3 +190,85 @@ def generate_toonflow_json():
             current_y += 200
             
     return json.dumps(project, ensure_ascii=False, indent=2)
+
+
+# ==============================================================================
+# 🚀 【五、 GitHub Actions 云端渲染触发器】
+# ==============================================================================
+
+def trigger_github_workflow(tab_name, resolution):
+    token = get_secret("GITHUB_TOKEN", ""); repo = get_secret("GITHUB_REPOSITORY", "")
+    if not token or not repo: return False, "缺少 GitHub Secrets 配置"
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"}
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/render.yml/dispatches"
+    try:
+        res = requests.post(url, headers=headers, json={"ref": get_secret("GITHUB_REF", "main"), "inputs": {"sheet_tab": tab_name, "resolution": resolution}}, timeout=10)
+        return (True, "成功") if res.status_code == 204 else (False, f"失败 [{res.status_code}]")
+    except Exception as e:
+        return False, str(e)
+
+
+# ==============================================================================
+# 🖥️ 【六、 Streamlit UI 界面构建】
+# ==============================================================================
+
+# --- 侧边栏 ---
+with st.sidebar:
+    st.title("🎬 Auto-Studio")
+    
+    # 功能 1：Toonflow 工程导出
+    st.markdown("### 📥 导出 Toonflow 工程")
+    st.caption("从表格抓取数据并转换为 Toonflow 节点文件")
+    if st.button("🔄 生成项目文件 (JSON)", use_container_width=True):
+        with st.spinner("正在抓取表格组装节点..."):
+            try:
+                tf_json = generate_toonflow_json()
+                # 动态生成按日命名的文件名，同一天下载的会自动覆盖
+                date_str = time.strftime("%Y%m%d")
+                dynamic_filename = f"Toonflow_{date_str}.json"
+                
+                st.download_button(
+                    label=f"✅ 点击下载 {dynamic_filename}", 
+                    data=tf_json, 
+                    file_name=dynamic_filename, 
+                    mime="application/json", 
+                    type="primary", 
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"生成失败: {e}")
+                
+    st.markdown("---")
+    
+    # 功能 2：云端渲染 (原有的 GitHub Actions 触发器)
+    st.markdown("### 🚀 云端自动渲染")
+    video_resolution = st.text_input("视频分辨率", value="1920x1080")
+    if st.button("▶️ Start Rendering", use_container_width=True):
+        ok, msg = trigger_github_workflow(TAB_NAME_SCRIPT, video_resolution)
+        if ok: st.success("✅ 云端任务已启动！")
+        else: st.error(f"❌ 启动失败：{msg}")
+
+# --- 主界面 ---
+with st.expander("🪄 **AI 故事拆解器 (文本草稿 ➔ 填充双表)**", expanded=True):
+    raw_draft = st.text_area("粘贴故事草稿：", placeholder="2026年的最后一次日食...", height=150)
+    col_1, col_2 = st.columns([3, 1])
+    with col_1:
+        selected_model = st.selectbox("选择 Gemini 模型：", options=list(RECOMMENDED_MODELS.keys()), format_func=lambda x: RECOMMENDED_MODELS[x])
+    with col_2:
+        st.write(""); st.write("")
+        if st.button("✨ 一键解析并写入表格", type="primary", use_container_width=True):
+            if not raw_draft.strip():
+                st.warning("⚠️ 请先粘贴草稿！")
+            else:
+                with st.spinner(f"🤖 正在调用AI并写入表格 (保护第一行Prompt)..."):
+                    try:
+                        process_and_update_sheets(raw_draft, selected_model, SHEET_EDIT_URL)
+                        st.success(f"🎉 解析成功！表格已更新。")
+                        time.sleep(1.5)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ 失败: {str(e)}")
+
+st.divider()
+st.link_button("📋前往 Google Sheets 编辑", SHEET_EDIT_URL, use_container_width=True)
+st.components.v1.iframe(SHEET_EMBED_URL, height=520, scrolling=True)

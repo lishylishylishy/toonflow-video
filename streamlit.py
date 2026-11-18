@@ -118,8 +118,12 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
     clean_json = text_content[start_idx:end_idx+1] if start_idx != -1 and end_idx != -1 else text_content
     project_data = json.loads(clean_json)
 
-    # 3. 写入 Settings 表
-    settings_data = project_data.get("settings", [])
+# 3. 提取数据（兼容 AI 可能使用的表名作为 JSON 键名）
+settings_data = project_data.get("settings") or project_data.get("toonflow-story-Settings") or []
+script_data = project_data.get("script") or project_data.get("toonflow-story-Script") or []
+
+if not settings_data and not script_data:
+    raise ValueError(f"未解析出有效数据，AI 实际返回的 JSON 键名为：{list(project_data.keys())}，完整内容：\n{clean_json[:400]}")
     # 【防崩溃补丁】给第一行补齐空白，防止长度不一致导致 gspread 报错
     padded_first_row = first_row + [""] * (len(SETTINGS_HEADERS) - len(first_row))
     rows_settings = [padded_first_row, SETTINGS_HEADERS]

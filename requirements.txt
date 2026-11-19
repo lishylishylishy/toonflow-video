@@ -3,3 +3,4 @@ edge-tts
 gspread
 google-api-python-client
 google-auth
+gradio_client

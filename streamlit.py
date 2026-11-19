@@ -63,13 +63,13 @@ st.markdown("""
 available_prompts = fetch_prompts_from_sheet()
 
 #if 'node_config' not in st.session_state:
-    st.session_state.node_config = {
-        'text_model': '["Qwen/Qwen3.8-27B"]',
-        'img_draft_model': '["Tongyi-MAI/Z-Image-Turbo"]',
-        'img_final_model': '["Qwen/Qwen-Image-2512"]',
-        'img_size': "1K",
-        'img_ratio': "9:16",
-        'img_count': 1
+st.session_state.node_config = {
+    'text_model': '["Qwen/Qwen3.8-27B"]',
+    'img_draft_model': '["Tongyi-MAI/Z-Image-Turbo"]',
+    'img_final_model': '["Qwen/Qwen-Image-2512"]',
+    'img_size': "1K",
+    'img_ratio': "9:16",
+    'img_count': 1
     }
 
 # ==============================================================================

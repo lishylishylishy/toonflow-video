@@ -16,7 +16,7 @@ TAB_NAME_PROMPT = "prompt"
 
 MAX_SCENE_COLUMNS = 5 
 SETTINGS_HEADERS = ["类型", "名称"] + [f"场景{i}" for i in range(1, MAX_SCENE_COLUMNS + 1)]
-SCRIPT_HEADERS = ["序号", "片段", "片段时长","背景图", "人物", "人物动态", "人物动画", "标题文字", "配音人物", "配音语气", "配音文字", "背景音"]
+SCRIPT_HEADERS = ["序号", "片段", "片段时长","背景图", "背景动画", "人物", "人物动态", "标题文字", "配音人物", "配音语气", "配音文字", "背景音"]
 
 RECOMMENDED_MODELS = {
     "gemini-3.5-flash-lite": "⚡ gemini-3.5-flash-lite (推荐！)",

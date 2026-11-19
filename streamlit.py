@@ -68,7 +68,7 @@ if 'node_config' not in st.session_state:
         'img_draft_model': '["Tongyi-MAI/Z-Image-Turbo"]',
         'img_final_model': '["Qwen/Qwen-Image-2512"]',
         'img_size': "1K",
-        'img_ratio': "16:9",
+        'img_ratio': "9:16",
         'img_count': 1
     }
 

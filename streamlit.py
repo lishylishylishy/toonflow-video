@@ -149,13 +149,12 @@ def create_standalone_node(label, text_content, gen_type, x, y, config):
     import json
     gen_id = str(uuid.uuid4())
     
-    # 解析模型字符串
+    # 尝试将配置字符串解析为列表，如果失败则直接使用字符串
     try:
-        img_model_parsed = json.loads(config['img_draft_model'])
+        img_model_parsed = json.loads(config['img_final_model'])
     except Exception:
-        img_model_parsed = config['img_draft_model']
+        img_model_parsed = config['img_final_model']
 
-    # 直接返回包含完整 Prompt 数据的单一生成节点，抛弃需要请求本地磁盘的 remote-textNode
     if gen_type == "image":
         node = {
             "id": gen_id, "type": "remote-imageGenerationNode", "position": {"x": x, "y": y},
@@ -163,7 +162,7 @@ def create_standalone_node(label, text_content, gen_type, x, y, config):
                 "label": label, 
                 "prompt": text_content, 
                 "promptModel": [[{"type": "Write", "text": text_content}]],
-                "model": img_model_parsed,   
+                "model": img_model_parsed,  # 这里将使用解析后的列表或原始字符串
                 "size": config['img_size'], "ratio": config['img_ratio'], "other": {"count": config['img_count']},
                 "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "输入"}, {"id": "image", "type": "source", "dataType": "IMAGE", "label": "输出"}]
             }

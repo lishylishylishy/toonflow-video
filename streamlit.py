@@ -102,7 +102,6 @@ def call_gemini_json(prompt_text, model_name):
     return json.loads(clean_json)
 
 def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
-    """单次请求并追加写入双表（不抹除现有数据）"""
     gcp_key_str = get_secret("GCP_SA_KEY", "")
     creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
     gc, sh = gspread.authorize(creds), gspread.authorize(creds).open_by_url(sheet_url)
@@ -147,19 +146,19 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
         ws_script.clear()
         ws_script.update(range_name='A1', values=rows_script)
 
-
 # ==============================================================================
-# 🧩 【四、 Toonflow 节点工程转换器 (分离版)】
+# 🧩 【四、 Toonflow 节点工程转换器 (修复版)】
 # ==============================================================================
 
 def create_node_pair(label, text_content, gen_type, x, y, config):
     text_id, gen_id = str(uuid.uuid4()), str(uuid.uuid4())
     
+    # 【修复】：彻底移除了会导致找不到文件的 textPath 属性，添加了直接的 text 属性
     text_node = {
         "id": text_id, "type": "remote-textNode", "initialized": False, "position": {"x": x, "y": y},
         "data": {
             "label": label, "handles": [{"id": "in", "type": "target", "dataType": ["VIDEO", "IMAGE", "STRING", "FILE"], "label": "输入"}, {"id": "text", "type": "source", "dataType": "STRING", "label": "输出"}],
-            "outputs": {}, "model": config['text_model'], "textPath": f"assets/{text_id}/content.md", "promptModel": [[{"type": "Write", "text": text_content}]]
+            "outputs": {}, "model": config['text_model'], "text": text_content, "promptModel": [[{"type": "Write", "text": text_content}]]
         }
     }
 
@@ -187,15 +186,15 @@ def create_node_pair(label, text_content, gen_type, x, y, config):
     return text_node, gen_node, edge
 
 
-def generate_toonflow_json(config, export_type="settings"):
+def generate_toonflow_json(config, export_type="all"):
     gcp_key_str = get_secret("GCP_SA_KEY", "")
     creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
     gc, sh = gspread.authorize(creds), gspread.authorize(creds).open_by_url(SHEET_EDIT_URL)
     
     project = {"toonflowCanvas": True, "nodes": [], "edges": [], "viewport": {"x": 450, "y": 450, "zoom": 0.5}}
-    current_y = -700 if export_type == "settings" else 30
+    current_y = -700
     
-    if export_type == "settings":
+    if export_type in ["settings", "all"]:
         settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records()
         for row in settings_records:
             item_type, name = str(row.get("类型", "")).strip(), str(row.get("名称", "")).strip()
@@ -207,7 +206,10 @@ def generate_toonflow_json(config, export_type="settings"):
                     t, g, e = create_node_pair(f"{prefix}-场景{i}", prompt, "image", x=-280, y=current_y, config=config)
                     project["nodes"].extend([t, g]); project["edges"].append(e); current_y += 220
                     
-    elif export_type == "script":
+    if export_type == "all": current_y = max(current_y, 30)
+    elif export_type == "script": current_y = 30
+        
+    if export_type in ["script", "all"]:
         script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
         for index, row in enumerate(script_records):
             fragment_id = f"片段{row.get('序号', index + 1)}"
@@ -248,34 +250,32 @@ with st.sidebar:
 
     st.markdown("---")
     
-    st.markdown("### 📥 导出 Toonflow 工程")
-    st.caption("提示：直接点击下方按钮触发浏览器下载，安全且不会迷路。")
-    
-    # --- 分离导出：全局设定 ---
-    st.markdown("📦 **导出【全局设定】节点**")
-    if st.button("🔄 抓取全局设定表", use_container_width=True):
-        with st.spinner("正在从表格抓取设定数据..."):
-            try:
+    st.markdown("### 📥 导出独立模块")
+    st.caption("配合开双网页使用：在新标签页打开下方下载的独立 JSON，全选复制，再到主画布粘贴，即可完美追加。")
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        if st.button("🔄 抓取【设定】", use_container_width=True):
+            with st.spinner("打包设定..."):
                 st.session_state.tf_settings_json = generate_toonflow_json(st.session_state.node_config, export_type="settings")
-                st.success("✅ 设定节点数据已就绪")
-            except Exception as e: st.error(f"生成失败: {e}")
+                st.success("✅ 设定就绪")
+    with col_dl2:
+        if st.button("🔄 抓取【剧本】", use_container_width=True):
+            with st.spinner("打包剧本..."):
+                st.session_state.tf_script_json = generate_toonflow_json(st.session_state.node_config, export_type="script")
+                st.success("✅ 剧本就绪")
             
     if 'tf_settings_json' in st.session_state:
-        st.download_button(label="⬇️ 下载 Toonflow_Settings.json", data=st.session_state.tf_settings_json, file_name=f"Toonflow_Settings_{time.strftime('%Y%m%d%H%M')}.json", mime="application/json", use_container_width=True, type="primary")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    # --- 分离导出：故事剧本 ---
-    st.markdown("📦 **导出【故事剧本】节点**")
-    if st.button("🔄 抓取故事剧本表", use_container_width=True):
-        with st.spinner("正在从表格抓取剧本数据..."):
-            try:
-                st.session_state.tf_script_json = generate_toonflow_json(st.session_state.node_config, export_type="script")
-                st.success("✅ 剧本节点数据已就绪")
-            except Exception as e: st.error(f"生成失败: {e}")
-            
+        st.download_button("⬇️ 下载 Toonflow_Settings.json", data=st.session_state.tf_settings_json, file_name=f"Settings_{time.strftime('%Y%m%d%H%M')}.json", mime="application/json", use_container_width=True)
     if 'tf_script_json' in st.session_state:
-        st.download_button(label="⬇️ 下载 Toonflow_Script.json", data=st.session_state.tf_script_json, file_name=f"Toonflow_Script_{time.strftime('%Y%m%d%H%M')}.json", mime="application/json", use_container_width=True, type="primary")
+        st.download_button("⬇️ 下载 Toonflow_Script.json", data=st.session_state.tf_script_json, file_name=f"Script_{time.strftime('%Y%m%d%H%M')}.json", mime="application/json", use_container_width=True)
+
+    st.markdown("🎁 **导出完整工程 (推荐组合)**")
+    if st.button("🔄 抓取【设定 + 剧本】完整包", type="primary", use_container_width=True):
+        with st.spinner("正在组装双表..."):
+            st.session_state.tf_all_json = generate_toonflow_json(st.session_state.node_config, export_type="all")
+            st.success("✅ 完整工程就绪")
+    if 'tf_all_json' in st.session_state:
+        st.download_button("⬇️ 下载 Toonflow_FullProject.json", data=st.session_state.tf_all_json, file_name=f"Toonflow_Full_{time.strftime('%Y%m%d%H%M')}.json", mime="application/json", use_container_width=True, type="primary")
 
 # --- 主界面 ---
 with st.expander("🪄 **AI 故事拆解器 (追加写入不丢数据)**", expanded=True):

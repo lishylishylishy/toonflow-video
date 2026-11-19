@@ -145,6 +145,8 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
 # ==============================================================================
 
 def create_node_pair(label, text_content, gen_type, x, y, config):
+    import uuid
+    import json
     text_id, gen_id = str(uuid.uuid4()), str(uuid.uuid4())
     
     # 【核心修复1】：将前端传来的模型字符串解析为真正的 List，防止 Toonflow 画布组件报错卡死
@@ -158,7 +160,7 @@ def create_node_pair(label, text_content, gen_type, x, y, config):
     except Exception:
         img_model_parsed = config['img_draft_model']
 
-    # 【核心修复2】：去除伪造的 status 和 initialized，提供最干净的自然节点数据
+    # 【核心修复2】：去除伪造的 status 和 initialized，提供最干净的自然节点数据，并强制写入 outputs 内联结构
     text_node = {
         "id": text_id, "type": "remote-textNode", "position": {"x": x, "y": y},
         "data": {
@@ -169,7 +171,13 @@ def create_node_pair(label, text_content, gen_type, x, y, config):
             ],
             "model": text_model_parsed,  # <--- 使用解析后的数组
             "text": text_content, 
-            "promptModel": [[{"type": "Write", "text": text_content}]]
+            "promptModel": [[{"type": "Write", "text": text_content}]],
+            "outputs": {
+                "text": {
+                    "dataType": "STRING",
+                    "value": text_content
+                }
+            }
         }
     }
 

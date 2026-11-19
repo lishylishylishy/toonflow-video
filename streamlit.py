@@ -149,21 +149,24 @@ def create_standalone_node(label, text_content, gen_type, x, y, config):
     import json
     gen_id = str(uuid.uuid4())
     
-    # 尝试将配置字符串解析为列表，如果失败则直接使用字符串
-    try:
-        img_model_parsed = json.loads(config['img_final_model'])
-    except Exception:
-        img_model_parsed = config['img_final_model']
-
     if gen_type == "image":
+        # 核心修复：Toonflow 强制要求 model 字段是一个“带有转义符的纯字符串”，决不能是 List。
+        # 我们把侧边栏的内容解析后，再 dump 成没有任何空格的紧凑字符串。
+        try:
+            raw_list = json.loads(config['img_draft_model'])
+            model_str = json.dumps(raw_list, separators=(',', ':'))
+        except Exception:
+            model_str = config['img_draft_model']
+
         node = {
             "id": gen_id, "type": "remote-imageGenerationNode", "position": {"x": x, "y": y},
             "data": {
                 "label": label, 
                 "prompt": text_content, 
                 "promptModel": [[{"type": "Write", "text": text_content}]],
-                "model": img_model_parsed,  # 这里将使用解析后的列表或原始字符串
-                "size": config['img_size'], "ratio": config['img_ratio'], "other": {"count": config['img_count']},
+                "model": model_str,  # 👈 强制传入纯字符串格式
+                "size": config['img_size'], "ratio": config['img_ratio'], 
+                "other": {}, # 根据官方 dse3.json，这里 other 应当为空
                 "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "输入"}, {"id": "image", "type": "source", "dataType": "IMAGE", "label": "输出"}]
             }
         }

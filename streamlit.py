@@ -2,6 +2,8 @@ import streamlit as st
 import requests, json, time, os, uuid
 import gspread
 from google.oauth2.service_account import Credentials
+import io, zipfile, shutil
+from gradio_client import Client
 
 # ==============================================================================
 # ⚙️ 【一、 全局集中配置区】
@@ -261,128 +263,4 @@ def generate_toonflow_json(config, export_type="all"):
             has_any_scene = False
             
             for i in range(1, MAX_SCENE_COLUMNS + 1):
-                prompt = str(row.get(f"场景{i}", "")).strip()
-                if prompt:
-                    has_any_scene = True
-                    node_label = f"{prefix}-场景{i}"
-                    
-                    # 横向排列：场景1在 x=-280，场景2~5 依次向右排开 (+380间距)，方便看清连线
-                    node_x = -280 + (i - 1) * 380
-                    
-                    # 如果是场景2~5且存在场景1，自动传入场景1作为参考图
-                    ref_info = scene1_ref if (i > 1 and scene1_ref is not None) else None
-                    
-                    g, edge = create_standalone_node(node_label, prompt, "image", x=node_x, y=current_y, config=config, ref_node_info=ref_info)
-                    project["nodes"].append(g)
-                    if edge:
-                        project["edges"].append(edge)
-                    
-                    # 记录场景1的 ID 和名称供后续场景引用
-                    if i == 1:
-                        scene1_ref = {"id": g["id"], "label": node_label}
-            
-            if has_any_scene:
-                current_y += 280  # 同一角色的多个场景在同一行横向排开，下一个角色再换行
-                    
-    if export_type == "all": current_y = max(current_y, 30)
-    elif export_type == "script": current_y = 30
-        
-    if export_type in ["script", "all"]:
-        try: script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
-        except: script_records = []
-        for index, row in enumerate(script_records):
-            fragment_id = f"片段{row.get('序号', index + 1)}"
-            
-            bg_img = str(row.get("背景图", "")).strip()
-            if bg_img:
-                g, _ = create_standalone_node(f"{fragment_id}-背景图", bg_img, "image", x=650, y=current_y, config=config)
-                project["nodes"].append(g)
-                current_y += 220
-                
-            voice_text = str(row.get("配音文字", "")).strip()
-            if voice_text:
-                voice_actor = str(row.get("配音人物", "")).strip()
-                g, _ = create_standalone_node(f"{fragment_id}-配音-{voice_actor}" if voice_actor else fragment_id, voice_text, "audio", x=650, y=current_y, config=config)
-                project["nodes"].append(g)
-                current_y += 220
-                
-            bgm_text = str(row.get("背景音", "")).strip()
-            if bgm_text:
-                g, _ = create_standalone_node(f"{fragment_id}-背景音", bgm_text, "audio", x=650, y=current_y, config=config)
-                project["nodes"].append(g)
-                current_y += 220
-            
-    return json.dumps(project, ensure_ascii=False, indent=2)
-# ==============================================================================
-# 🖥️ 【五、 Streamlit UI 界面构建 (极简重构版)】
-# ==============================================================================
-
-with st.sidebar:
-    st.title("🎬 Auto-Studio")
-    
-    st.markdown("### 🎛️ 节点参数配置")
-    st.session_state.node_config['text_model'] = st.text_input("📝 文本模型", value=st.session_state.node_config['text_model'])
-    st.session_state.node_config['img_draft_model'] = st.text_input("🎨 生图模型 (草稿用)", value=st.session_state.node_config['img_draft_model'])
-    st.session_state.node_config['img_final_model'] = st.text_input("💎 生图模型 (精绘备用)", value=st.session_state.node_config['img_final_model'])
-    
-    col_size, col_ratio = st.columns(2)
-    with col_size: st.session_state.node_config['img_size'] = st.selectbox("画面尺寸", ["1K", "2K", "4K"], index=["1K", "2K", "4K"].index(st.session_state.node_config['img_size']))
-    with col_ratio: st.session_state.node_config['img_ratio'] = st.selectbox("画面比例", ["16:9", "9:16", "1:1", "4:3", "3:4"], index=["16:9", "9:16", "1:1", "4:3", "3:4"].index(st.session_state.node_config['img_ratio']))
-    st.session_state.node_config['img_count'] = st.number_input("生图张数", min_value=1, max_value=4, value=st.session_state.node_config['img_count'])
-
-    st.markdown("---")
-    
-    # 【修复】：摒弃乱七八糟的5个按钮，采用极简的单线表单流
-    st.markdown("### 📥 导出画布节点 (追加用)")
-    st.caption("提示：在下放选择需要的模块，获取后于新标签页打开粘贴。")
-    
-    with st.form("export_form"):
-        export_mode = st.radio("选择导出类型:", ["独立【设定】模块", "独立【剧本】模块", "完整工程 (设定+剧本)"])
-        submitted = st.form_submit_button("1. 抓取表格数据", use_container_width=True)
-        
-        if submitted:
-            with st.spinner("正在从表格提取并组装节点..."):
-                type_map = {"独立【设定】模块": "settings", "独立【剧本】模块": "script", "完整工程 (设定+剧本)": "all"}
-                file_map = {"独立【设定】模块": "Settings", "独立【剧本】模块": "Script", "完整工程 (设定+剧本)": "FullProject"}
-                
-                st.session_state.dl_data = generate_toonflow_json(st.session_state.node_config, export_type=type_map[export_mode])
-                st.session_state.dl_filename = f"Toonflow_{file_map[export_mode]}_{time.strftime('%Y%m%d%H%M')}.json"
-                st.success("✅ 数据抓取成功！请点击下方按钮下载。")
-
-    if 'dl_data' in st.session_state:
-        st.download_button(
-            label=f"2. ⬇️ 下载 {st.session_state.dl_filename}", 
-            data=st.session_state.dl_data, 
-            file_name=st.session_state.dl_filename, 
-            mime="application/json", 
-            use_container_width=True, 
-            type="primary"
-        )
-
-# --- 主界面 ---
-with st.expander("🪄 **AI 故事拆解器 (纯追加模式)**", expanded=True):
-    raw_draft = st.text_area("粘贴故事草稿：", placeholder="在这里粘贴你的故事大纲或小说段落...", height=150)
-    prompt_keys = list(available_prompts.keys())
-    
-    col_1, col_2, col_3 = st.columns([2, 1, 1])
-    with col_1:
-        selected_prompt_title = st.selectbox("选择解析指令：", options=prompt_keys, index=0 if prompt_keys else 0)
-    with col_2:
-        selected_model = st.selectbox("核心大脑模型：", options=list(RECOMMENDED_MODELS.keys()), format_func=lambda x: RECOMMENDED_MODELS[x])
-    with col_3:
-        st.write(""); st.write("")
-        if st.button("✨ 仅在末尾追加填表", type="primary", use_container_width=True):
-            if not raw_draft.strip(): st.warning("⚠️ 请先粘贴草稿！")
-            elif "错误" in selected_prompt_title or not available_prompts.get(selected_prompt_title, "").strip(): st.warning("⚠️ 请确保 prompt 工作表中有有效数据！")
-            else:
-                with st.spinner("🤖 正在调用 AI 并在末尾追加行..."):
-                    try:
-                        p_target = available_prompts[selected_prompt_title]
-                        process_and_append_sheets(raw_draft, p_target, selected_model, SHEET_EDIT_URL)
-                        st.success("🎉 追加成功！原数据未受任何影响。")
-                        time.sleep(1.5); st.rerun()
-                    except Exception as e: st.error(f"❌ 失败: {str(e)}")
-
-st.divider()
-st.link_button("📋 前往 Google Sheets 手动调整", SHEET_EDIT_URL, use_container_width=True)
-st.components.v1.iframe(SHEET_EMBED_URL, height=550, scrolling=True)
+                prompt = str(row.get(f"场景{i}", "")

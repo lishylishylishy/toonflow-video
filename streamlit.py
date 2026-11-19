@@ -56,6 +56,7 @@ st.markdown("""
         header[data-testid="stHeader"] { background-color: transparent !important; }
         .block-container { padding-top: 2rem !important; padding-bottom: 1rem !important; }
         iframe { border-radius: 8px; border: 1px solid #e0e0e0; }
+        div[data-testid="stForm"] { border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -72,7 +73,7 @@ if 'node_config' not in st.session_state:
     }
 
 # ==============================================================================
-# 🤖 【三、 核心逻辑：AI 解析与双表追加写入】
+# 🤖 【三、 核心逻辑：AI 解析与纯追加写入】
 # ==============================================================================
 
 def call_gemini_json(prompt_text, model_name):
@@ -104,81 +105,79 @@ def call_gemini_json(prompt_text, model_name):
 def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
     gcp_key_str = get_secret("GCP_SA_KEY", "")
     creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-    gc, sh = gspread.authorize(creds), gspread.authorize(creds).open_by_url(sheet_url)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_url(sheet_url)
     
     st.toast("⏳ 正在请求 AI 解析...")
     
-    try:
-        ws_settings = sh.worksheet(TAB_NAME_SETTINGS)
-        current_settings = ws_settings.get_all_records()
-    except Exception:
-        current_settings = []
+    # 仅读取上下文，不赋予覆盖权限
+    try: current_settings = sh.worksheet(TAB_NAME_SETTINGS).get_all_records()
+    except Exception: current_settings = []
     
     context_str = json.dumps(current_settings, ensure_ascii=False) if current_settings else "目前为空"
     final_prompt = f"{selected_prompt}\n\n【草稿文案内容】：\n{raw_text}\n\n【参考上下文（表格中已有的全局设定）】：\n{context_str}"
     
     result_data = call_gemini_json(final_prompt, model_name)
-    
     settings_new = result_data.get("settings", result_data.get("Settings", []))
     script_new = result_data.get("script", result_data.get("Script", []))
     
+    # 【修复】：使用 append_rows 纯追加模式，AI 绝无权限删除或覆盖已有内容
     if settings_new:
         try: ws_settings = sh.worksheet(TAB_NAME_SETTINGS)
-        except: ws_settings = sh.add_worksheet(title=TAB_NAME_SETTINGS, rows="100", cols="20")
-        
-        existing_settings_data = ws_settings.get_all_values()
-        rows_settings = existing_settings_data if existing_settings_data else [SETTINGS_HEADERS]
-        for item in settings_new:
-            rows_settings.append([str(item.get(col, "")) for col in SETTINGS_HEADERS])
+        except: 
+            ws_settings = sh.add_worksheet(title=TAB_NAME_SETTINGS, rows="100", cols="20")
+            ws_settings.append_row(SETTINGS_HEADERS)
             
-        ws_settings.clear()
-        ws_settings.update(range_name='A1', values=rows_settings)
+        rows_to_append = [[str(item.get(col, "")) for col in SETTINGS_HEADERS] for item in settings_new]
+        if rows_to_append: ws_settings.append_rows(rows_to_append)
 
     if script_new:
         try: ws_script = sh.worksheet(TAB_NAME_SCRIPT)
-        except: ws_script = sh.add_worksheet(title=TAB_NAME_SCRIPT, rows="100", cols="20")
-        
-        existing_script_data = ws_script.get_all_values()
-        rows_script = existing_script_data if existing_script_data else [SCRIPT_HEADERS]
-        for item in script_new:
-            rows_script.append([str(item.get(col, "")) for col in SCRIPT_HEADERS])
+        except: 
+            ws_script = sh.add_worksheet(title=TAB_NAME_SCRIPT, rows="100", cols="20")
+            ws_script.append_row(SCRIPT_HEADERS)
             
-        ws_script.clear()
-        ws_script.update(range_name='A1', values=rows_script)
+        rows_to_append = [[str(item.get(col, "")) for col in SCRIPT_HEADERS] for item in script_new]
+        if rows_to_append: ws_script.append_rows(rows_to_append)
 
 # ==============================================================================
-# 🧩 【四、 Toonflow 节点工程转换器 (修复版)】
+# 🧩 【四、 Toonflow 节点工程转换器 (状态修复版)】
 # ==============================================================================
 
 def create_node_pair(label, text_content, gen_type, x, y, config):
     text_id, gen_id = str(uuid.uuid4()), str(uuid.uuid4())
     
-    # 【修复】：彻底移除了会导致找不到文件的 textPath 属性，添加了直接的 text 属性
+    # 【修复】：将 initialized 设为 true，并加入 status: success，防止卡在“文件上传中”状态
     text_node = {
-        "id": text_id, "type": "remote-textNode", "initialized": False, "position": {"x": x, "y": y},
+        "id": text_id, "type": "remote-textNode", "initialized": True, "position": {"x": x, "y": y},
         "data": {
-            "label": label, "handles": [{"id": "in", "type": "target", "dataType": ["VIDEO", "IMAGE", "STRING", "FILE"], "label": "输入"}, {"id": "text", "type": "source", "dataType": "STRING", "label": "输出"}],
-            "outputs": {}, "model": config['text_model'], "text": text_content, "promptModel": [[{"type": "Write", "text": text_content}]]
+            "label": label, 
+            "handles": [{"id": "in", "type": "target", "dataType": ["VIDEO", "IMAGE", "STRING", "FILE"], "label": "输入"}, {"id": "text", "type": "source", "dataType": "STRING", "label": "输出"}],
+            "outputs": {}, "model": config['text_model'], "text": text_content, 
+            "promptModel": [[{"type": "Write", "text": text_content}]],
+            "status": "success"
         }
     }
 
     if gen_type == "image":
         gen_node = {
-            "id": gen_id, "type": "remote-imageGenerationNode", "initialized": False, "position": {"x": x + 360, "y": y},
+            "id": gen_id, "type": "remote-imageGenerationNode", "initialized": True, "position": {"x": x + 360, "y": y},
             "data": {
                 "label": label, "prompt": text_content, "promptModel": [[{"type": "Write", "text": text_content}]],
                 "inpaintPrompt": "", "inpaintPromptModel": [], "model": config['img_draft_model'],
                 "size": config['img_size'], "ratio": config['img_ratio'], "other": {"count": config['img_count']},
-                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "输入"}, {"id": "image", "type": "source", "dataType": "IMAGE", "label": "输出"}], "outputs": {}
+                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "输入"}, {"id": "image", "type": "source", "dataType": "IMAGE", "label": "输出"}], 
+                "outputs": {}, "status": "success"
             }
         }
     else:
         gen_node = {
-            "id": gen_id, "type": "remote-audioGenerationNode", "initialized": False, "position": {"x": x + 360, "y": y},
+            "id": gen_id, "type": "remote-audioGenerationNode", "initialized": True, "position": {"x": x + 360, "y": y},
             "data": {
                 "label": label, "prompt": text_content, "promptModel": [[{"type": "Write", "text": text_content}]],
                 "model": "", "language": "zh-CN", "sampleRate": 24000, "format": "wav", "other": {},
-                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "输入"}, {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "输出"}], "outputs": {}
+                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "输入"}, {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "输出"}], 
+                "outputs": {}, "status": "success"
             }
         }
 
@@ -195,7 +194,8 @@ def generate_toonflow_json(config, export_type="all"):
     current_y = -700
     
     if export_type in ["settings", "all"]:
-        settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records()
+        try: settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records()
+        except: settings_records = []
         for row in settings_records:
             item_type, name = str(row.get("类型", "")).strip(), str(row.get("名称", "")).strip()
             if not name: continue
@@ -210,7 +210,8 @@ def generate_toonflow_json(config, export_type="all"):
     elif export_type == "script": current_y = 30
         
     if export_type in ["script", "all"]:
-        script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
+        try: script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
+        except: script_records = []
         for index, row in enumerate(script_records):
             fragment_id = f"片段{row.get('序号', index + 1)}"
             bg_img = str(row.get("背景图", "")).strip()
@@ -232,7 +233,7 @@ def generate_toonflow_json(config, export_type="all"):
     return json.dumps(project, ensure_ascii=False, indent=2)
 
 # ==============================================================================
-# 🖥️ 【五、 Streamlit UI 界面构建】
+# 🖥️ 【五、 Streamlit UI 界面构建 (极简重构版)】
 # ==============================================================================
 
 with st.sidebar:
@@ -250,35 +251,35 @@ with st.sidebar:
 
     st.markdown("---")
     
-    st.markdown("### 📥 导出独立模块")
-    st.caption("配合开双网页使用：在新标签页打开下方下载的独立 JSON，全选复制，再到主画布粘贴，即可完美追加。")
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        if st.button("🔄 抓取【设定】", use_container_width=True):
-            with st.spinner("打包设定..."):
-                st.session_state.tf_settings_json = generate_toonflow_json(st.session_state.node_config, export_type="settings")
-                st.success("✅ 设定就绪")
-    with col_dl2:
-        if st.button("🔄 抓取【剧本】", use_container_width=True):
-            with st.spinner("打包剧本..."):
-                st.session_state.tf_script_json = generate_toonflow_json(st.session_state.node_config, export_type="script")
-                st.success("✅ 剧本就绪")
-            
-    if 'tf_settings_json' in st.session_state:
-        st.download_button("⬇️ 下载 Toonflow_Settings.json", data=st.session_state.tf_settings_json, file_name=f"Settings_{time.strftime('%Y%m%d%H%M')}.json", mime="application/json", use_container_width=True)
-    if 'tf_script_json' in st.session_state:
-        st.download_button("⬇️ 下载 Toonflow_Script.json", data=st.session_state.tf_script_json, file_name=f"Script_{time.strftime('%Y%m%d%H%M')}.json", mime="application/json", use_container_width=True)
+    # 【修复】：摒弃乱七八糟的5个按钮，采用极简的单线表单流
+    st.markdown("### 📥 导出画布节点 (追加用)")
+    st.caption("提示：在下放选择需要的模块，获取后于新标签页打开粘贴。")
+    
+    with st.form("export_form"):
+        export_mode = st.radio("选择导出类型:", ["独立【设定】模块", "独立【剧本】模块", "完整工程 (设定+剧本)"])
+        submitted = st.form_submit_button("1. 抓取表格数据", use_container_width=True)
+        
+        if submitted:
+            with st.spinner("正在从表格提取并组装节点..."):
+                type_map = {"独立【设定】模块": "settings", "独立【剧本】模块": "script", "完整工程 (设定+剧本)": "all"}
+                file_map = {"独立【设定】模块": "Settings", "独立【剧本】模块": "Script", "完整工程 (设定+剧本)": "FullProject"}
+                
+                st.session_state.dl_data = generate_toonflow_json(st.session_state.node_config, export_type=type_map[export_mode])
+                st.session_state.dl_filename = f"Toonflow_{file_map[export_mode]}_{time.strftime('%Y%m%d%H%M')}.json"
+                st.success("✅ 数据抓取成功！请点击下方按钮下载。")
 
-    st.markdown("🎁 **导出完整工程 (推荐组合)**")
-    if st.button("🔄 抓取【设定 + 剧本】完整包", type="primary", use_container_width=True):
-        with st.spinner("正在组装双表..."):
-            st.session_state.tf_all_json = generate_toonflow_json(st.session_state.node_config, export_type="all")
-            st.success("✅ 完整工程就绪")
-    if 'tf_all_json' in st.session_state:
-        st.download_button("⬇️ 下载 Toonflow_FullProject.json", data=st.session_state.tf_all_json, file_name=f"Toonflow_Full_{time.strftime('%Y%m%d%H%M')}.json", mime="application/json", use_container_width=True, type="primary")
+    if 'dl_data' in st.session_state:
+        st.download_button(
+            label=f"2. ⬇️ 下载 {st.session_state.dl_filename}", 
+            data=st.session_state.dl_data, 
+            file_name=st.session_state.dl_filename, 
+            mime="application/json", 
+            use_container_width=True, 
+            type="primary"
+        )
 
 # --- 主界面 ---
-with st.expander("🪄 **AI 故事拆解器 (追加写入不丢数据)**", expanded=True):
+with st.expander("🪄 **AI 故事拆解器 (纯追加模式)**", expanded=True):
     raw_draft = st.text_area("粘贴故事草稿：", placeholder="在这里粘贴你的故事大纲或小说段落...", height=150)
     prompt_keys = list(available_prompts.keys())
     
@@ -289,15 +290,15 @@ with st.expander("🪄 **AI 故事拆解器 (追加写入不丢数据)**", expan
         selected_model = st.selectbox("核心大脑模型：", options=list(RECOMMENDED_MODELS.keys()), format_func=lambda x: RECOMMENDED_MODELS[x])
     with col_3:
         st.write(""); st.write("")
-        if st.button("✨ 解析并追加填表", type="primary", use_container_width=True):
+        if st.button("✨ 仅在末尾追加填表", type="primary", use_container_width=True):
             if not raw_draft.strip(): st.warning("⚠️ 请先粘贴草稿！")
             elif "错误" in selected_prompt_title or not available_prompts.get(selected_prompt_title, "").strip(): st.warning("⚠️ 请确保 prompt 工作表中有有效数据！")
             else:
-                with st.spinner("🤖 正在调用 AI 并追加更新双表..."):
+                with st.spinner("🤖 正在调用 AI 并在末尾追加行..."):
                     try:
                         p_target = available_prompts[selected_prompt_title]
                         process_and_append_sheets(raw_draft, p_target, selected_model, SHEET_EDIT_URL)
-                        st.success("🎉 追加解析成功！双表已更新。")
+                        st.success("🎉 追加成功！原数据未受任何影响。")
                         time.sleep(1.5); st.rerun()
                     except Exception as e: st.error(f"❌ 失败: {str(e)}")
 

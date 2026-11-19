@@ -263,4 +263,4 @@ def generate_toonflow_json(config, export_type="all"):
             has_any_scene = False
             
             for i in range(1, MAX_SCENE_COLUMNS + 1):
-                prompt = str(row.get(f"场景{i}", "")
+                prompt = str(row.get(f"场景{i}", "").strip()

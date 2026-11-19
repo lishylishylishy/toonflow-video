@@ -144,32 +144,86 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
 # 🧩 【四、 Toonflow 节点工程转换器 (状态修复版)】
 # ==============================================================================
 
-def create_standalone_node(label, text_content, gen_type, x, y, config):
+def create_standalone_node(label, text_content, gen_type, x, y, config, ref_node_info=None):
     import uuid
     import json
+    import urllib.parse
+    import re
+    
     gen_id = str(uuid.uuid4())
     
     if gen_type == "image":
-        # 核心修复：Toonflow 强制要求 model 字段是一个“带有转义符的纯字符串”，决不能是 List。
-        # 我们把侧边栏的内容解析后，再 dump 成没有任何空格的紧凑字符串。
         try:
             raw_list = json.loads(config['img_draft_model'])
             model_str = json.dumps(raw_list, separators=(',', ':'))
         except Exception:
             model_str = config['img_draft_model']
 
+        # 处理自动 @场景1 引用逻辑
+        final_prompt = text_content
+        prompt_model_items = []
+        edge_to_add = None
+
+        if ref_node_info:
+            ref_id = ref_node_info["id"]
+            ref_label = ref_node_info["label"]
+            
+            # 1. 生成节点连线 (Edge)
+            edge_to_add = {
+                "id": f"vueflow__edge-{ref_id}image-{gen_id}in",
+                "type": "simplebezier",
+                "source": ref_id,
+                "target": gen_id,
+                "sourceHandle": "image",
+                "targetHandle": "in"
+            }
+
+            # 2. 构造 Toonflow 专属富文本标签
+            encoded_ref = urllib.parse.quote(json.dumps([ref_id, "image"], separators=(',', ':')))
+            custom_tag = {
+                "type": "Custom",
+                "html": f'<span style="display: inline-block;"><span class="imageReference previewable" data-reference-id="{encoded_ref}" data-value="{{{{ref 1}}}}">{ref_label}</span></span>'
+            }
+
+            # 3. 识别文本中的 @引用 / @场景1 占位符；若用户没写，则自动加在句首
+            pattern = r'(@引用|@场景1|@参考图)'
+            if re.search(pattern, text_content):
+                final_prompt = re.sub(pattern, '{{ref 1}}', text_content)
+                parts = re.split(pattern, text_content)
+                for part in parts:
+                    if not part:
+                        continue
+                    if re.match(pattern, part):
+                        prompt_model_items.append(custom_tag)
+                    else:
+                        prompt_model_items.append({"type": "Write", "text": part})
+            else:
+                final_prompt = f"参考{{{{ref 1}}}}，{text_content}"
+                prompt_model_items = [
+                    {"type": "Write", "text": "参考"},
+                    custom_tag,
+                    {"type": "Write", "text": f"，{text_content}"}
+                ]
+        else:
+            prompt_model_items = [{"type": "Write", "text": text_content}]
+
         node = {
             "id": gen_id, "type": "remote-imageGenerationNode", "position": {"x": x, "y": y},
             "data": {
                 "label": label, 
-                "prompt": text_content, 
-                "promptModel": [[{"type": "Write", "text": text_content}]],
-                "model": model_str,  # 👈 强制传入纯字符串格式
+                "prompt": final_prompt, 
+                "promptModel": [prompt_model_items],
+                "model": model_str,
                 "size": config['img_size'], "ratio": config['img_ratio'], 
-                "other": {}, # 根据官方 dse3.json，这里 other 应当为空
-                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "输入"}, {"id": "image", "type": "source", "dataType": "IMAGE", "label": "输出"}]
+                "other": {},
+                "handles": [
+                    {"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "图片、文本输入"}, 
+                    {"id": "image", "type": "source", "dataType": "IMAGE", "label": "图片输出"}
+                ]
             }
         }
+        return node, edge_to_add
+
     else:
         node = {
             "id": gen_id, "type": "remote-audioGenerationNode", "position": {"x": x, "y": y},
@@ -178,10 +232,13 @@ def create_standalone_node(label, text_content, gen_type, x, y, config):
                 "prompt": text_content, 
                 "promptModel": [[{"type": "Write", "text": text_content}]],
                 "model": "", "language": "zh-CN", "sampleRate": 24000, "format": "wav", "other": {},
-                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "输入"}, {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "输出"}]
+                "handles": [
+                    {"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "图片或音频限1个，文本不限"}, 
+                    {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "音频输出"}
+                ]
             }
         }
-    return node
+        return node, None
 
 
 def generate_toonflow_json(config, export_type="all"):
@@ -199,13 +256,33 @@ def generate_toonflow_json(config, export_type="all"):
             item_type, name = str(row.get("类型", "")).strip(), str(row.get("名称", "")).strip()
             if not name: continue
             prefix = f"{item_type}-{name}" if item_type else name
+            
+            scene1_ref = None  # 用于记录当前角色/背景“场景1”的节点信息
+            has_any_scene = False
+            
             for i in range(1, MAX_SCENE_COLUMNS + 1):
                 prompt = str(row.get(f"场景{i}", "")).strip()
                 if prompt:
-                    # 仅生成并添加单一节点，不再维护 edges 连线
-                    g = create_standalone_node(f"{prefix}-场景{i}", prompt, "image", x=-280, y=current_y, config=config)
+                    has_any_scene = True
+                    node_label = f"{prefix}-场景{i}"
+                    
+                    # 横向排列：场景1在 x=-280，场景2~5 依次向右排开 (+380间距)，方便看清连线
+                    node_x = -280 + (i - 1) * 380
+                    
+                    # 如果是场景2~5且存在场景1，自动传入场景1作为参考图
+                    ref_info = scene1_ref if (i > 1 and scene1_ref is not None) else None
+                    
+                    g, edge = create_standalone_node(node_label, prompt, "image", x=node_x, y=current_y, config=config, ref_node_info=ref_info)
                     project["nodes"].append(g)
-                    current_y += 220
+                    if edge:
+                        project["edges"].append(edge)
+                    
+                    # 记录场景1的 ID 和名称供后续场景引用
+                    if i == 1:
+                        scene1_ref = {"id": g["id"], "label": node_label}
+            
+            if has_any_scene:
+                current_y += 280  # 同一角色的多个场景在同一行横向排开，下一个角色再换行
                     
     if export_type == "all": current_y = max(current_y, 30)
     elif export_type == "script": current_y = 30
@@ -218,20 +295,20 @@ def generate_toonflow_json(config, export_type="all"):
             
             bg_img = str(row.get("背景图", "")).strip()
             if bg_img:
-                g = create_standalone_node(f"{fragment_id}-背景图", bg_img, "image", x=650, y=current_y, config=config)
+                g, _ = create_standalone_node(f"{fragment_id}-背景图", bg_img, "image", x=650, y=current_y, config=config)
                 project["nodes"].append(g)
                 current_y += 220
                 
             voice_text = str(row.get("配音文字", "")).strip()
             if voice_text:
                 voice_actor = str(row.get("配音人物", "")).strip()
-                g = create_standalone_node(f"{fragment_id}-配音-{voice_actor}" if voice_actor else fragment_id, voice_text, "audio", x=650, y=current_y, config=config)
+                g, _ = create_standalone_node(f"{fragment_id}-配音-{voice_actor}" if voice_actor else fragment_id, voice_text, "audio", x=650, y=current_y, config=config)
                 project["nodes"].append(g)
                 current_y += 220
                 
             bgm_text = str(row.get("背景音", "")).strip()
             if bgm_text:
-                g = create_standalone_node(f"{fragment_id}-背景音", bgm_text, "audio", x=650, y=current_y, config=config)
+                g, _ = create_standalone_node(f"{fragment_id}-背景音", bgm_text, "audio", x=650, y=current_y, config=config)
                 project["nodes"].append(g)
                 current_y += 220
             

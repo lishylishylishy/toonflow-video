@@ -147,41 +147,58 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
 def create_node_pair(label, text_content, gen_type, x, y, config):
     text_id, gen_id = str(uuid.uuid4()), str(uuid.uuid4())
     
-    # 【修复】：将 initialized 设为 true，并加入 status: success，防止卡在“文件上传中”状态
+    # 【核心修复1】：将前端传来的模型字符串解析为真正的 List，防止 Toonflow 画布组件报错卡死
+    try:
+        text_model_parsed = json.loads(config['text_model'])
+    except Exception:
+        text_model_parsed = config['text_model']
+        
+    try:
+        img_model_parsed = json.loads(config['img_draft_model'])
+    except Exception:
+        img_model_parsed = config['img_draft_model']
+
+    # 【核心修复2】：去除伪造的 status 和 initialized，提供最干净的自然节点数据
     text_node = {
-        "id": text_id, "type": "remote-textNode", "initialized": True, "position": {"x": x, "y": y},
+        "id": text_id, "type": "remote-textNode", "position": {"x": x, "y": y},
         "data": {
             "label": label, 
-            "handles": [{"id": "in", "type": "target", "dataType": ["VIDEO", "IMAGE", "STRING", "FILE"], "label": "输入"}, {"id": "text", "type": "source", "dataType": "STRING", "label": "输出"}],
-            "outputs": {}, "model": config['text_model'], "text": text_content, 
-            "promptModel": [[{"type": "Write", "text": text_content}]],
-            "status": "success"
+            "handles": [
+                {"id": "in", "type": "target", "dataType": ["VIDEO", "IMAGE", "STRING", "FILE"], "label": "输入"}, 
+                {"id": "text", "type": "source", "dataType": "STRING", "label": "输出"}
+            ],
+            "model": text_model_parsed,  # <--- 使用解析后的数组
+            "text": text_content, 
+            "promptModel": [[{"type": "Write", "text": text_content}]]
         }
     }
 
     if gen_type == "image":
         gen_node = {
-            "id": gen_id, "type": "remote-imageGenerationNode", "initialized": True, "position": {"x": x + 360, "y": y},
+            "id": gen_id, "type": "remote-imageGenerationNode", "position": {"x": x + 360, "y": y},
             "data": {
                 "label": label, "prompt": text_content, "promptModel": [[{"type": "Write", "text": text_content}]],
-                "inpaintPrompt": "", "inpaintPromptModel": [], "model": config['img_draft_model'],
+                "model": img_model_parsed,   # <--- 使用解析后的数组
                 "size": config['img_size'], "ratio": config['img_ratio'], "other": {"count": config['img_count']},
-                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "输入"}, {"id": "image", "type": "source", "dataType": "IMAGE", "label": "输出"}], 
-                "outputs": {}, "status": "success"
+                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "输入"}, {"id": "image", "type": "source", "dataType": "IMAGE", "label": "输出"}]
             }
         }
     else:
         gen_node = {
-            "id": gen_id, "type": "remote-audioGenerationNode", "initialized": True, "position": {"x": x + 360, "y": y},
+            "id": gen_id, "type": "remote-audioGenerationNode", "position": {"x": x + 360, "y": y},
             "data": {
                 "label": label, "prompt": text_content, "promptModel": [[{"type": "Write", "text": text_content}]],
                 "model": "", "language": "zh-CN", "sampleRate": 24000, "format": "wav", "other": {},
-                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "输入"}, {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "输出"}], 
-                "outputs": {}, "status": "success"
+                "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "输入"}, {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "输出"}]
             }
         }
 
-    edge = {"id": f"vueflow__edge-{text_id}text-{gen_id}in", "type": "simplebezier", "source": text_id, "target": gen_id, "sourceHandle": "text", "targetHandle": "in", "updatable": False, "selectable": False, "focusable": False, "data": {}, "label": "", "interactionWidth": 40, "animated": False}
+    edge = {
+        "id": f"vueflow__edge-{text_id}text-{gen_id}in", 
+        "type": "simplebezier", "source": text_id, "target": gen_id, 
+        "sourceHandle": "text", "targetHandle": "in"
+    }
+    
     return text_node, gen_node, edge
 
 

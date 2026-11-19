@@ -12,6 +12,7 @@ SHEET_EMBED_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9tt
 
 TAB_NAME_SETTINGS = "toonflow-story-Settings"
 TAB_NAME_SCRIPT = "toonflow-story-Script"
+TAB_NAME_PROMPT = "prompt" # 新增：存放 Prompt 的表格名称
 
 # 本地记忆配置文件路径（用于记住你的导出目录）
 LOCAL_CONFIG_FILE = ".studio_config.json"
@@ -58,6 +59,30 @@ def save_export_dir(path):
             json.dump({"export_dir": path}, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+        
+@st.cache_data(ttl=60) # 缓存60秒，避免频繁读取表格
+def fetch_prompts_from_sheet():
+    """从 Google Sheets 读取 prompt 配置"""
+    gcp_key_str = get_secret("GCP_SA_KEY", "")
+    if not gcp_key_str:
+        return {"错误": "未配置 GCP_SA_KEY"}
+    try:
+        creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_url(SHEET_EDIT_URL)
+        ws_prompt = sh.worksheet(TAB_NAME_PROMPT)
+        records = ws_prompt.get_all_values()
+        
+        prompts = {}
+        for row in records:
+            if len(row) >= 2 and row[0].strip(): # 确保 A 列有标题
+                prompts[row[0].strip()] = row[1].strip()
+        
+        if not prompts:
+            return {"默认": "请在 prompt 表格中添加数据。"}
+        return prompts
+    except Exception as e:
+        return {"读取错误": f"读取 prompt 表格失败: {e}"}
 
 # ==============================================================================
 # 🎨 【二、 Streamlit 初始化】
@@ -72,11 +97,26 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# 获取动态 Prompts
+available_prompts = fetch_prompts_from_sheet()
+
+# 初始化 session state 用于存储参数控制
+if 'node_config' not in st.session_state:
+    st.session_state.node_config = {
+        'img_model': "", # 默认为空，使用内置
+        'img_size': "1K",
+        'img_ratio': "16:9",
+        'img_count': 1
+    }
+if "export_dir" not in st.session_state:
+    st.session_state.export_dir = load_saved_export_dir()
+
+
 # ==============================================================================
 # 🤖 【三、 核心逻辑：AI 解析与双表写入】
 # ==============================================================================
 
-def process_and_update_sheets(raw_text, model_name, sheet_url):
+def process_and_update_sheets(raw_text, selected_prompt_text, model_name, sheet_url):
     gcp_key_str = get_secret("GCP_SA_KEY", "")
     if not gcp_key_str:
         raise ValueError("未在 Streamlit Secrets 中找到 GCP_SA_KEY 密钥！")
@@ -85,22 +125,9 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(sheet_url)
     
-    # 1. 读取 Settings 表第一行的 Prompt
-    try:
-        ws_settings = sh.worksheet(TAB_NAME_SETTINGS)
-        first_row = ws_settings.row_values(1)
-        base_prompt = first_row[1] if len(first_row) > 1 else ""
-    except gspread.exceptions.WorksheetNotFound:
-        ws_settings = sh.add_worksheet(title=TAB_NAME_SETTINGS, rows="100", cols="20")
-        first_row = ["Prompt", "请在B1填写你的系统提示词..."]
-        base_prompt = first_row[1]
-
-    if not base_prompt:
-        raise ValueError("未在 Settings 表的 B1 单元格找到 Prompt，请先在表格中填写！")
-
-    final_prompt = f"{base_prompt}\n\n【草稿文案内容】：\n{raw_text}"
+    final_prompt = f"{selected_prompt_text}\n\n【草稿文案内容】：\n{raw_text}"
     
-    # 2. 调用 Gemini API（带 503/429 自动重试与备用模型降级）
+    # 调用 Gemini API
     gemini_key = get_secret("GEMINI_API_KEY", "")
     if not gemini_key:
         raise ValueError("未在 Streamlit Secrets 中找到 GEMINI_API_KEY 密钥！")
@@ -132,13 +159,13 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
         
     text_content = res.json()['candidates'][0]['content']['parts'][0]['text']
     
-    # 【防崩溃补丁】暴力提取 JSON，无视 AI 附带的废话
+    # 暴力提取 JSON
     start_idx = text_content.find('{')
     end_idx = text_content.rfind('}')
     clean_json = text_content[start_idx:end_idx+1] if start_idx != -1 and end_idx != -1 else text_content
     project_data = json.loads(clean_json)
 
-    # 3. 智能提取数据（兼容大小写与完整表名）
+    # 智能提取数据
     settings_data = (
         project_data.get("settings") or 
         project_data.get("Settings") or 
@@ -152,20 +179,23 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
         []
     )
 
-    # 【防清空保护】若未解析出任何数据，立即拦截并显示 AI 真实返回的键名，绝不清空原表
     if not settings_data and not script_data:
         keys_found = list(project_data.keys()) if isinstance(project_data, dict) else type(project_data).__name__
         raise ValueError(f"未解析出有效数据，AI 实际返回的 JSON 键名为：{keys_found}，内容片段：\n{clean_json[:400]}")
 
-    # 4. 写入 Settings 表
-    padded_first_row = first_row + [""] * (len(SETTINGS_HEADERS) - len(first_row))
-    rows_settings = [padded_first_row, SETTINGS_HEADERS]
+    # 写入 Settings 表 (不再需要保护第一行)
+    try:
+        ws_settings = sh.worksheet(TAB_NAME_SETTINGS)
+    except gspread.exceptions.WorksheetNotFound:
+        ws_settings = sh.add_worksheet(title=TAB_NAME_SETTINGS, rows="100", cols="20")
+        
+    rows_settings = [SETTINGS_HEADERS]
     for item in settings_data:
         rows_settings.append([str(item.get(col, "")) for col in SETTINGS_HEADERS])
     ws_settings.clear()
     ws_settings.update(range_name='A1', values=rows_settings)
 
-    # 5. 写入 Script 表
+    # 写入 Script 表
     try:
         ws_script = sh.worksheet(TAB_NAME_SCRIPT)
     except gspread.exceptions.WorksheetNotFound:
@@ -178,14 +208,13 @@ def process_and_update_sheets(raw_text, model_name, sheet_url):
     ws_script.update(range_name='A1', values=rows_script)
 
 # ==============================================================================
-# 🧩 【四、 Toonflow 节点工程转换器 (严格对齐 Toonflow 模板结构)】
+# 🧩 【四、 Toonflow 节点工程转换器】
 # ==============================================================================
 
-def create_node_pair(label, text_content, gen_type, x, y):
+def create_node_pair(label, text_content, gen_type, x, y, config):
     text_id = str(uuid.uuid4())
     gen_id = str(uuid.uuid4())
     
-    # 1. 文本节点（完全对齐模板结构）
     text_node = {
         "id": text_id,
         "type": "remote-textNode",
@@ -194,16 +223,16 @@ def create_node_pair(label, text_content, gen_type, x, y):
         "data": {
             "label": label,
             "handles": [
-                {"id": "in", "type": "target", "dataType": ["VIDEO", "IMAGE", "STRING", "FILE"], "label": "视频、图片、文本、文件输入"},
-                {"id": "text", "type": "source", "dataType": "STRING", "label": "文本输出"}
+                {"id": "in", "type": "target", "dataType": ["VIDEO", "IMAGE", "STRING", "FILE"], "label": "输入"},
+                {"id": "text", "type": "source", "dataType": "STRING", "label": "输出"}
             ],
             "outputs": {},
             "model": "[\"deepSeek\",\"deepseek-flash\"]",
+            "textPath": f"assets/{text_id}/content.md",
             "promptModel": [[{"type": "Write", "text": text_content}]]
         }
     }
 
-    # 2. 生成节点（根据 image / audio 补齐各自的默认配置字段）
     if gen_type == "image":
         gen_node = {
             "id": gen_id,
@@ -212,17 +241,17 @@ def create_node_pair(label, text_content, gen_type, x, y):
             "position": {"x": x + 360, "y": y},
             "data": {
                 "label": label,
-                "prompt": "",
-                "promptModel": [[{"type": "Write", "text": ""}]],
+                "prompt": text_content, # 自动带入 prompt
+                "promptModel": [[{"type": "Write", "text": text_content}]],
                 "inpaintPrompt": "",
                 "inpaintPromptModel": [],
-                "model": "[\"modelscopeImageProvider\",\"Tongyi-MAI/Z-Image-Turbo\"]",
-                "size": "2K",
-                "ratio": "16:9",
-                "other": {},
+                "model": config['img_model'],
+                "size": config['img_size'],
+                "ratio": config['img_ratio'],
+                "other": {"count": config['img_count']},
                 "handles": [
-                    {"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "图片、文本输入"},
-                    {"id": "image", "type": "source", "dataType": "IMAGE", "label": "图片输出"}
+                    {"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "输入"},
+                    {"id": "image", "type": "source", "dataType": "IMAGE", "label": "输出"}
                 ],
                 "outputs": {}
             }
@@ -235,22 +264,21 @@ def create_node_pair(label, text_content, gen_type, x, y):
             "position": {"x": x + 360, "y": y},
             "data": {
                 "label": label,
-                "prompt": "",
-                "promptModel": [[{"type": "Write", "text": ""}]],
+                "prompt": text_content,
+                "promptModel": [[{"type": "Write", "text": text_content}]],
                 "model": "",
                 "language": "zh-CN",
                 "sampleRate": 24000,
                 "format": "wav",
                 "other": {},
                 "handles": [
-                    {"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "图片或音频限1个，文本不限"},
-                    {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "音频输出"}
+                    {"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "输入"},
+                    {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "输出"}
                 ],
                 "outputs": {}
             }
         }
 
-    # 3. 连线（补齐模板中的交互与坐标属性）
     edge = {
         "id": f"vueflow__edge-{text_id}text-{gen_id}in",
         "type": "simplebezier",
@@ -269,8 +297,7 @@ def create_node_pair(label, text_content, gen_type, x, y):
     return text_node, gen_node, edge
 
 
-def generate_toonflow_json():
-    """抓取 Google 表格，生成完全兼容 Toonflow 的 JSON 项目文件"""
+def generate_toonflow_json(config):
     gcp_key_str = get_secret("GCP_SA_KEY", "")
     creds = Credentials.from_service_account_info(
         json.loads(gcp_key_str),
@@ -279,10 +306,10 @@ def generate_toonflow_json():
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(SHEET_EDIT_URL)
     
-    settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records(head=2)
+    # 假设表头在第一行
+    settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records()
     script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
     
-    # 根级必须包含 viewport 字段，否则 Toonflow 画布无法初始化
     project = {
         "toonflowCanvas": True,
         "nodes": [],
@@ -295,7 +322,6 @@ def generate_toonflow_json():
     }
     current_y = -700
     
-    # 1. 生成全局资产节点 (Settings) -> 标签格式对齐模板：类型-名称-场景X
     for row in settings_records:
         item_type = str(row.get("类型", "")).strip()
         name = str(row.get("名称", "")).strip()
@@ -306,39 +332,35 @@ def generate_toonflow_json():
             scene_key = f"场景{i}"
             prompt = str(row.get(scene_key, "")).strip()
             if prompt:
-                t, g, e = create_node_pair(f"{prefix}-{scene_key}", prompt, "image", x=-280, y=current_y)
+                t, g, e = create_node_pair(f"{prefix}-{scene_key}", prompt, "image", x=-280, y=current_y, config=config)
                 project["nodes"].extend([t, g])
                 project["edges"].append(e)
                 current_y += 220
                 
-    current_y = 30
+    current_y = max(current_y, 30) 
     
-    # 2. 生成分镜资产节点 (Script) -> 包含背景图、配音、背景音
     for index, row in enumerate(script_records):
         fragment_id = f"片段{row.get('序号', index + 1)}"
         
-        # 背景图节点
         bg_img = str(row.get("背景图", "")).strip()
         if bg_img:
-            t, g, e = create_node_pair(f"{fragment_id}-背景图", bg_img, "image", x=650, y=current_y)
+            t, g, e = create_node_pair(f"{fragment_id}-背景图", bg_img, "image", x=650, y=current_y, config=config)
             project["nodes"].extend([t, g])
             project["edges"].append(e)
             current_y += 220
             
-        # 配音节点
         voice_text = str(row.get("配音文字", "")).strip()
         if voice_text:
             voice_actor = str(row.get("配音人物", "")).strip()
             voice_label = f"{fragment_id}-配音-{voice_actor}" if voice_actor else fragment_id
-            t, g, e = create_node_pair(voice_label, voice_text, "audio", x=650, y=current_y)
+            t, g, e = create_node_pair(voice_label, voice_text, "audio", x=650, y=current_y, config=config)
             project["nodes"].extend([t, g])
             project["edges"].append(e)
             current_y += 220
             
-        # 背景音节点
         bgm_text = str(row.get("背景音", "")).strip()
         if bgm_text:
-            t, g, e = create_node_pair(f"{fragment_id}-背景音", bgm_text, "audio", x=650, y=current_y)
+            t, g, e = create_node_pair(f"{fragment_id}-背景音", bgm_text, "audio", x=650, y=current_y, config=config)
             project["nodes"].extend([t, g])
             project["edges"].append(e)
             current_y += 220
@@ -366,16 +388,24 @@ def trigger_github_workflow(tab_name, resolution):
 # 🖥️ 【六、 Streamlit UI 界面构建】
 # ==============================================================================
 
-if "export_dir" not in st.session_state:
-    st.session_state.export_dir = load_saved_export_dir()
-
-# --- 侧边栏 ---
+# --- 侧边栏：参数配置和导出 ---
 with st.sidebar:
     st.title("🎬 Auto-Studio")
     
-    # 功能 1：Toonflow 工程导出（支持指定并永久记住本地路径）
-    st.markdown("### 📥 导出 Toonflow 工程")
+    st.markdown("### 🎛️ 节点参数配置")
+    st.session_state.node_config['img_model'] = st.text_input("生图模型(留空用默认)", value=st.session_state.node_config['img_model'], help='如果要强制使用指定模型，请填入对应标识，如 ["modelscopeImageProvider","Tongyi-MAI/Z-Image-Turbo"]')
     
+    col_size, col_ratio = st.columns(2)
+    with col_size:
+        st.session_state.node_config['img_size'] = st.selectbox("画面尺寸", ["1K", "2K", "4K"], index=["1K", "2K", "4K"].index(st.session_state.node_config['img_size']))
+    with col_ratio:
+        st.session_state.node_config['img_ratio'] = st.selectbox("画面比例", ["16:9", "9:16", "1:1", "4:3", "3:4"], index=["16:9", "9:16", "1:1", "4:3", "3:4"].index(st.session_state.node_config['img_ratio']))
+    
+    st.session_state.node_config['img_count'] = st.number_input("生图张数", min_value=1, max_value=4, value=st.session_state.node_config['img_count'])
+
+    st.markdown("---")
+    
+    st.markdown("### 📥 导出 Toonflow 工程")
     custom_dir = st.text_input(
         "本地保存路径（自动记住）：",
         value=st.session_state.export_dir,
@@ -388,14 +418,13 @@ with st.sidebar:
     if st.button("🔄 生成并保存到本地", use_container_width=True):
         with st.spinner("正在抓取表格组装节点..."):
             try:
-                tf_json = generate_toonflow_json()
+                tf_json = generate_toonflow_json(st.session_state.node_config)
                 date_str = time.strftime("%Y%m%d")
                 dynamic_filename = f"Toonflow_{date_str}.json"
                 
                 target_dir = st.session_state.export_dir.strip()
                 save_export_dir(target_dir)
                 
-                # 尝试直接写入指定的本地硬盘目录（本地运行 Streamlit 时生效）
                 try:
                     os.makedirs(target_dir, exist_ok=True)
                     full_path = os.path.join(target_dir, dynamic_filename)
@@ -403,9 +432,8 @@ with st.sidebar:
                         f.write(tf_json)
                     st.success(f"✅ 已直接覆盖保存至：\n`{full_path}`")
                 except Exception as io_err:
-                    st.warning(f"⚠️ 无法直接写入本地路径（云端部署环境下受浏览器安全限制），请点击下方按钮手动下载：{io_err}")
+                    st.warning(f"⚠️ 无法直接写入本地路径，请点击下方按钮手动下载：{io_err}")
 
-                # 同时提供浏览器下载按钮作为双保险
                 st.download_button(
                     label=f"⬇️ 浏览器下载 {dynamic_filename}", 
                     data=tf_json, 
@@ -418,8 +446,6 @@ with st.sidebar:
                 st.error(f"生成失败: {e}")
                 
     st.markdown("---")
-    
-    # 功能 2：云端渲染
     st.markdown("### 🚀 云端自动渲染")
     video_resolution = st.text_input("视频分辨率", value="1920x1080")
     if st.button("▶️ Start Rendering", use_container_width=True):
@@ -430,18 +456,24 @@ with st.sidebar:
 # --- 主界面 ---
 with st.expander("🪄 **AI 故事拆解器 (文本草稿 ➔ 填充双表)**", expanded=True):
     raw_draft = st.text_area("粘贴故事草稿：", placeholder="2026年的最后一次日食...", height=150)
-    col_1, col_2 = st.columns([3, 1])
+    
+    col_1, col_2, col_3 = st.columns([2, 1, 1])
     with col_1:
-        selected_model = st.selectbox("选择 Gemini 模型：", options=list(RECOMMENDED_MODELS.keys()), format_func=lambda x: RECOMMENDED_MODELS[x])
+        selected_prompt_title = st.selectbox("选择 Prompt 模板：", options=list(available_prompts.keys()))
+        selected_prompt_text = available_prompts.get(selected_prompt_title, "")
     with col_2:
+        selected_model = st.selectbox("选择 Gemini 模型：", options=list(RECOMMENDED_MODELS.keys()), format_func=lambda x: RECOMMENDED_MODELS[x])
+    with col_3:
         st.write(""); st.write("")
         if st.button("✨ 一键解析并写入表格", type="primary", use_container_width=True):
             if not raw_draft.strip():
                 st.warning("⚠️ 请先粘贴草稿！")
+            elif "错误" in selected_prompt_title or "默认" in selected_prompt_title and not selected_prompt_text.strip():
+                st.warning("⚠️ 请确保 prompt 工作表中有有效数据！")
             else:
-                with st.spinner("🤖 正在调用AI并写入表格 (保护第一行Prompt)..."):
+                with st.spinner("🤖 正在调用AI并写入表格..."):
                     try:
-                        process_and_update_sheets(raw_draft, selected_model, SHEET_EDIT_URL)
+                        process_and_update_sheets(raw_draft, selected_prompt_text, selected_model, SHEET_EDIT_URL)
                         st.success("🎉 解析成功！表格已更新。")
                         time.sleep(1.5)
                         st.rerun()

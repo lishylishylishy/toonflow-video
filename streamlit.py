@@ -144,70 +144,42 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
 # 🧩 【四、 Toonflow 节点工程转换器 (状态修复版)】
 # ==============================================================================
 
-def create_node_pair(label, text_content, gen_type, x, y, config):
+def create_standalone_node(label, text_content, gen_type, x, y, config):
     import uuid
     import json
-    text_id, gen_id = str(uuid.uuid4()), str(uuid.uuid4())
+    gen_id = str(uuid.uuid4())
     
-    # 【核心修复1】：将前端传来的模型字符串解析为真正的 List，防止 Toonflow 画布组件报错卡死
-    try:
-        text_model_parsed = json.loads(config['text_model'])
-    except Exception:
-        text_model_parsed = config['text_model']
-        
+    # 解析模型字符串
     try:
         img_model_parsed = json.loads(config['img_draft_model'])
     except Exception:
         img_model_parsed = config['img_draft_model']
 
-    # 【核心修复2】：去除伪造的 status 和 initialized，提供最干净的自然节点数据，并强制写入 outputs 内联结构
-    text_node = {
-        "id": text_id, "type": "remote-textNode", "position": {"x": x, "y": y},
-        "data": {
-            "label": label, 
-            "handles": [
-                {"id": "in", "type": "target", "dataType": ["VIDEO", "IMAGE", "STRING", "FILE"], "label": "输入"}, 
-                {"id": "text", "type": "source", "dataType": "STRING", "label": "输出"}
-            ],
-            "model": text_model_parsed,  # <--- 使用解析后的数组
-            "text": text_content, 
-            "promptModel": [[{"type": "Write", "text": text_content}]],
-            "outputs": {
-                "text": {
-                    "dataType": "STRING",
-                    "value": text_content
-                }
-            }
-        }
-    }
-
+    # 直接返回包含完整 Prompt 数据的单一生成节点，抛弃需要请求本地磁盘的 remote-textNode
     if gen_type == "image":
-        gen_node = {
-            "id": gen_id, "type": "remote-imageGenerationNode", "position": {"x": x + 360, "y": y},
+        node = {
+            "id": gen_id, "type": "remote-imageGenerationNode", "position": {"x": x, "y": y},
             "data": {
-                "label": label, "prompt": text_content, "promptModel": [[{"type": "Write", "text": text_content}]],
-                "model": img_model_parsed,   # <--- 使用解析后的数组
+                "label": label, 
+                "prompt": text_content, 
+                "promptModel": [[{"type": "Write", "text": text_content}]],
+                "model": img_model_parsed,   
                 "size": config['img_size'], "ratio": config['img_ratio'], "other": {"count": config['img_count']},
                 "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "输入"}, {"id": "image", "type": "source", "dataType": "IMAGE", "label": "输出"}]
             }
         }
     else:
-        gen_node = {
-            "id": gen_id, "type": "remote-audioGenerationNode", "position": {"x": x + 360, "y": y},
+        node = {
+            "id": gen_id, "type": "remote-audioGenerationNode", "position": {"x": x, "y": y},
             "data": {
-                "label": label, "prompt": text_content, "promptModel": [[{"type": "Write", "text": text_content}]],
+                "label": label, 
+                "prompt": text_content, 
+                "promptModel": [[{"type": "Write", "text": text_content}]],
                 "model": "", "language": "zh-CN", "sampleRate": 24000, "format": "wav", "other": {},
                 "handles": [{"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "输入"}, {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "输出"}]
             }
         }
-
-    edge = {
-        "id": f"vueflow__edge-{text_id}text-{gen_id}in", 
-        "type": "simplebezier", "source": text_id, "target": gen_id, 
-        "sourceHandle": "text", "targetHandle": "in"
-    }
-    
-    return text_node, gen_node, edge
+    return node
 
 
 def generate_toonflow_json(config, export_type="all"):
@@ -228,8 +200,10 @@ def generate_toonflow_json(config, export_type="all"):
             for i in range(1, MAX_SCENE_COLUMNS + 1):
                 prompt = str(row.get(f"场景{i}", "")).strip()
                 if prompt:
-                    t, g, e = create_node_pair(f"{prefix}-场景{i}", prompt, "image", x=-280, y=current_y, config=config)
-                    project["nodes"].extend([t, g]); project["edges"].append(e); current_y += 220
+                    # 仅生成并添加单一节点，不再维护 edges 连线
+                    g = create_standalone_node(f"{prefix}-场景{i}", prompt, "image", x=-280, y=current_y, config=config)
+                    project["nodes"].append(g)
+                    current_y += 220
                     
     if export_type == "all": current_y = max(current_y, 30)
     elif export_type == "script": current_y = 30
@@ -239,24 +213,27 @@ def generate_toonflow_json(config, export_type="all"):
         except: script_records = []
         for index, row in enumerate(script_records):
             fragment_id = f"片段{row.get('序号', index + 1)}"
+            
             bg_img = str(row.get("背景图", "")).strip()
             if bg_img:
-                t, g, e = create_node_pair(f"{fragment_id}-背景图", bg_img, "image", x=650, y=current_y, config=config)
-                project["nodes"].extend([t, g]); project["edges"].append(e); current_y += 220
+                g = create_standalone_node(f"{fragment_id}-背景图", bg_img, "image", x=650, y=current_y, config=config)
+                project["nodes"].append(g)
+                current_y += 220
                 
             voice_text = str(row.get("配音文字", "")).strip()
             if voice_text:
                 voice_actor = str(row.get("配音人物", "")).strip()
-                t, g, e = create_node_pair(f"{fragment_id}-配音-{voice_actor}" if voice_actor else fragment_id, voice_text, "audio", x=650, y=current_y, config=config)
-                project["nodes"].extend([t, g]); project["edges"].append(e); current_y += 220
+                g = create_standalone_node(f"{fragment_id}-配音-{voice_actor}" if voice_actor else fragment_id, voice_text, "audio", x=650, y=current_y, config=config)
+                project["nodes"].append(g)
+                current_y += 220
                 
             bgm_text = str(row.get("背景音", "")).strip()
             if bgm_text:
-                t, g, e = create_node_pair(f"{fragment_id}-背景音", bgm_text, "audio", x=650, y=current_y, config=config)
-                project["nodes"].extend([t, g]); project["edges"].append(e); current_y += 220
+                g = create_standalone_node(f"{fragment_id}-背景音", bgm_text, "audio", x=650, y=current_y, config=config)
+                project["nodes"].append(g)
+                current_y += 220
             
     return json.dumps(project, ensure_ascii=False, indent=2)
-
 # ==============================================================================
 # 🖥️ 【五、 Streamlit UI 界面构建 (极简重构版)】
 # ==============================================================================

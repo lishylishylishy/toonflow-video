@@ -62,7 +62,7 @@ st.markdown("""
 
 available_prompts = fetch_prompts_from_sheet()
 
-if 'node_config' not in st.session_state:
+#if 'node_config' not in st.session_state:
     st.session_state.node_config = {
         'text_model': '["Qwen/Qwen3.8-27B"]',
         'img_draft_model': '["Tongyi-MAI/Z-Image-Turbo"]',

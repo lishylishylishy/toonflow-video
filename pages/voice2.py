@@ -179,8 +179,8 @@ GEMINI_API_KEY = get_config([
     "api_key",
 ])
 
-if "sfx_cache" not in st.session_state:
-    st.session_state["sfx_cache"] = {}
+    if "sfx_cache" not in st.session_state:
+        st.session_state["sfx_cache"] = {}
 
 
     if GEMINI_API_KEY:

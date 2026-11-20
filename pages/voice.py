@@ -38,7 +38,7 @@ def generate_audio_modelscope(text, voice_id, instruct_text, api_key):
     """
     try:
         # 连接到魔塔空间
-        client = Client("https://modelscope.cn/api/v1/studio/iic/CosyVoice2-0.5B/gradio/", hf_token=api_key)
+        client = Client("https://modelscope.cn/api/v1/studio/iic/CosyVoice2-0.5B/gradio/")
         
         # 发送预测请求，参数严格对应 UI 结构
         result = client.predict(

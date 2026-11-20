@@ -106,12 +106,12 @@ def call_mmaudio_api(client: Client, candidate_apis: list, *args):
             if isinstance(res, dict):
                 return res.get("path") or res.get("video") or res.get("audio") or str(res)
             return res
-        except Exception as e:
-            last_err = e
-            if "quota" in str(e).lower():
-                raise RuntimeError(f"Hugging Face 今日免费 GPU 额度已用完，请次日重置后再试或更换 HF_TOKEN（详情：{e}）")
-            if attempt < 2:
-                time.sleep(3)
+            except Exception as e:
+                last_err = e
+                if "quota" in str(e).lower():
+                    raise RuntimeError(f"ZeroGPU 算力受限（请检查 Token 是否为 Read 类型）：{e}")
+                if attempt < 2:
+                    time.sleep(3)
     raise RuntimeError(f"MMAudio 接口调用失败: {last_err}")
 
 

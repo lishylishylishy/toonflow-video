@@ -147,7 +147,7 @@ def translate_scene_sfx_with_gemini(
 
 def safe_filename(text: str, max_len: int = 18) -> str:
     cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", str(text).strip())
-    return cleaned[:max_len].strip("_") or "音效"
+    return cleaned[:max_len].strip("_") or "背景音"
 
 
 # ==============================================================================
@@ -293,7 +293,7 @@ with tab_bgm:
                                 dur,
                             )
                             ext = os.path.splitext(audio_path)[1] or ".flac"
-                            fname = f"片段{seq}_音效_{safe_filename(cn_desc)}{ext}"
+                            fname = f"片段{seq}_背景_{safe_filename(cn_desc)}{ext}"
                             with open(audio_path, "rb") as f:
                                 results.append(
                                     (fname, f.read(), cn_desc, en_prompt, dur)
@@ -354,7 +354,7 @@ with tab_foley:
             mm_client = get_mmaudio_client(HF_TOKEN)
             foley_results = []
             for vid in videos:
-                with st.spinner(f"正在分析画面并合成同步音效：{vid.name} ..."):
+                with st.spinner(f"正在分析画面并合成同步背景音：{vid.name} ..."):
                     with tempfile.NamedTemporaryFile(
                         suffix=".mp4", delete=False
                     ) as tmp_v:

@@ -250,16 +250,16 @@ def generate_toonflow_json(config, export_type="settings"):
             clip_prefix = f"片段{seq}-{clip_title}" if clip_title else f"片段{seq}"
             node_x, has_clip_node = -280, False
             
-            # 1. 文生图节点：背景图、人物
+            # 1. 文生图节点：直接命名为「背景图」、「人物」
             for img_col in ["背景图", "人物"]:
                 val = str(row.get(img_col, "")).strip()
                 if val:
-                    node, _ = create_image_node(f"{clip_prefix}-{img_col}", val, node_x, current_y, config)
+                    node, _ = create_image_node(img_col, val, node_x, current_y, config)
                     project["nodes"].append(node)
                     node_x += 420
                     has_clip_node = True
             
-            # 2. 文本节点：背景动画、人物动态、标题文字（不为空则导出）
+            # 2. 文本节点：背景动画、人物动态、标题文字（锚定片段和序号，不为空则导出）
             for txt_col in ["背景动画", "人物动态", "标题文字"]:
                 val = str(row.get(txt_col, "")).strip()
                 if val:
@@ -270,7 +270,7 @@ def generate_toonflow_json(config, export_type="settings"):
                 
             if has_clip_node: current_y += 420
 
-    return json.dumps(project, ensure_ascii=False, indent=2), len(project["nodes"])
+    return json.dumps(project, ensure_ascii=False, indent=2)
 
 # ==============================================================================
 # 📌 【左侧边栏：Google 表格直达与实时预览】
@@ -329,7 +329,7 @@ if st.button("🚀 解析并写入 Google 表格", type="primary", use_container
 st.divider()
 
 # ------------------------------------------------------------------------------
-# 第二部分：导出视觉工程 JSON (Toonflow) —— 独立导出 Settings 与 Script
+# 第二部分：导出视觉工程 JSON (Toonflow) —— 单按钮一键生成并下载
 # ------------------------------------------------------------------------------
 st.subheader("2. 导出视觉工程 JSON (Toonflow)")
 
@@ -356,40 +356,25 @@ else:
 
 st.write("")
 
-# 独立导出模块一：Settings
-st.markdown("#### ① 导出 Settings 工程（定妆 / 定景文生图节点）")
-if st.button("📦 生成 Settings 工程 JSON", use_container_width=True):
-    json_str, node_cnt = generate_toonflow_json(st.session_state.node_config, "settings")
-    st.session_state["export_settings_json"] = json_str
-    st.session_state["export_settings_cnt"] = node_cnt
-    st.session_state["export_settings_name"] = f"Toonflow_Settings_{int(time.time())}.json"
-
-if "export_settings_json" in st.session_state:
+btn_c1, btn_c2 = st.columns(2, gap="medium")
+with btn_c1:
     st.download_button(
-        label=f"⬇️ 下载 Settings JSON（共 {st.session_state['export_settings_cnt']} 个节点）",
-        data=st.session_state["export_settings_json"],
-        file_name=st.session_state["export_settings_name"],
+        label="⬇️ 导出 Settings 工程 JSON（定妆 / 定景）",
+        data=lambda: generate_toonflow_json(st.session_state.node_config, "settings"),
+        file_name=f"Toonflow_Settings_{int(time.time())}.json",
         mime="application/json",
         type="primary",
         use_container_width=True,
+        key="dl_settings_json",
     )
 
-st.write("")
-
-# 独立导出模块二：Script
-st.markdown("#### ② 导出 Script 工程（文生图：背景图/人物 ｜ 文本：背景动画/人物动态/标题文字）")
-if st.button("🎬 生成 Script 工程 JSON", use_container_width=True):
-    json_str, node_cnt = generate_toonflow_json(st.session_state.node_config, "script")
-    st.session_state["export_script_json"] = json_str
-    st.session_state["export_script_cnt"] = node_cnt
-    st.session_state["export_script_name"] = f"Toonflow_Script_{int(time.time())}.json"
-
-if "export_script_json" in st.session_state:
+with btn_c2:
     st.download_button(
-        label=f"⬇️ 下载 Script JSON（共 {st.session_state['export_script_cnt']} 个节点）",
-        data=st.session_state["export_script_json"],
-        file_name=st.session_state["export_script_name"],
+        label="⬇️ 导出 Script 工程 JSON（分镜画面与文本）",
+        data=lambda: generate_toonflow_json(st.session_state.node_config, "script"),
+        file_name=f"Toonflow_Script_{int(time.time())}.json",
         mime="application/json",
         type="primary",
         use_container_width=True,
+        key="dl_script_json",
     )

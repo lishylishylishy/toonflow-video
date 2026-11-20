@@ -38,7 +38,7 @@ def generate_audio_modelscope(text, voice_id, instruct_text, api_key):
     """
     try:
         # 连接到魔塔空间
-        client = Client("https://modelscope.cn/api/v1/studio/iic/CosyVoice2-0.5B/gradio/")
+        client = Client("https://modelscope.cn/studios/iic/CosyVoice2-0.5B")
         
         # 发送预测请求，参数严格对应 UI 结构
         result = client.predict(
@@ -65,7 +65,7 @@ st.title("🎙️ 魔塔 CosyVoice 配音控制台")
 st.markdown("通过魔塔 ModelScope Gradio 接口 (自然语言控制) 生成音频。")
 
 # 替换为魔塔 API Key 验证
-MODELSCOPE_API_KEY = st.text_input("🔑 请输入魔塔 API Token", type="password", value=get_secret("MODELSCOPE_API_KEY", ""))
+#MODELSCOPE_API_KEY = st.text_input("🔑 请输入魔塔 API Token", type="password", value=get_secret("MODELSCOPE_API_KEY", ""))
 
 if st.button("📥 从表格读取最新配音脚本", use_container_width=True):
     with st.spinner("正在读取表格数据..."):

@@ -305,7 +305,7 @@ with c_p2:
         format_func=lambda k: RECOMMENDED_MODELS[k]
     )
 
-with st.expander("📝 查看 / 微调当前 Prompt 内容", expanded=False):
+with st.expander("📝Prompt", expanded=False):
     current_prompt_text = st.text_area(
         "Prompt 内容",
         value=available_prompts.get(selected_prompt_name, "") if isinstance(available_prompts, dict) else "",

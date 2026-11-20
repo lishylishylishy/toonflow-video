@@ -1,13 +1,13 @@
 import streamlit as st
 
-# ⚠️ 必须在所有代码的最前面调用 set_page_config，否则极易引发白屏
 st.set_page_config(page_title="Auto Video Studio", page_icon="🎬", layout="wide")
 
 import requests, json, time, os, uuid, re
 import urllib.parse
 import gspread
 from google.oauth2.service_account import Credentials
-# ⚠️ 已彻底删除 from gradio_client import Client，防止 Uvicorn 进程堵死主线程导致白屏
+import zipfile
+from io import BytesIO
 
 # ==============================================================================
 # ⚙️ 【一、 全局集中配置区】
@@ -44,7 +44,6 @@ def fetch_prompts_from_sheet():
         sh = gc.open_by_url(SHEET_EDIT_URL)
         ws_prompt = sh.worksheet(TAB_NAME_PROMPT)
         records = ws_prompt.get_all_values()
-        
         prompts = {}
         for row in records:
             if len(row) >= 2 and row[0].strip():
@@ -113,9 +112,7 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
     creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(sheet_url)
-    
     st.toast("⏳ 正在请求 AI 解析...")
-    
     try: current_settings = sh.worksheet(TAB_NAME_SETTINGS).get_all_records()
     except Exception: current_settings = []
     
@@ -131,7 +128,6 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
         except: 
             ws_settings = sh.add_worksheet(title=TAB_NAME_SETTINGS, rows="100", cols="20")
             ws_settings.append_row(SETTINGS_HEADERS)
-            
         rows_to_append = [[str(item.get(col, "")) for col in SETTINGS_HEADERS] for item in settings_new]
         if rows_to_append: ws_settings.append_rows(rows_to_append)
 
@@ -140,93 +136,71 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
         except: 
             ws_script = sh.add_worksheet(title=TAB_NAME_SCRIPT, rows="100", cols="20")
             ws_script.append_row(SCRIPT_HEADERS)
-            
         rows_to_append = [[str(item.get(col, "")) for col in SCRIPT_HEADERS] for item in script_new]
         if rows_to_append: ws_script.append_rows(rows_to_append)
 
 # ==============================================================================
-# 🧩 【四、 Toonflow 节点工程转换器】
+# 🧩 【四、 Toonflow 节点工程转换器 (仅限视觉节点)】
 # ==============================================================================
 
 def create_standalone_node(label, text_content, gen_type, x, y, config, ref_node_info=None):
     gen_id = str(uuid.uuid4())
-    
-    if gen_type == "image":
-        try:
-            raw_list = json.loads(config['img_draft_model'])
-            model_str = json.dumps(raw_list, separators=(',', ':'))
-        except Exception:
-            model_str = config['img_draft_model']
+    try:
+        raw_list = json.loads(config['img_draft_model'])
+        model_str = json.dumps(raw_list, separators=(',', ':'))
+    except Exception:
+        model_str = config['img_draft_model']
 
-        final_prompt = text_content
-        prompt_model_items = []
-        edge_to_add = None
+    final_prompt = text_content
+    prompt_model_items = []
+    edge_to_add = None
 
-        if ref_node_info:
-            ref_id = ref_node_info["id"]
-            ref_label = ref_node_info["label"]
-            
-            edge_to_add = {
-                "id": f"vueflow__edge-{ref_id}image-{gen_id}in",
-                "type": "simplebezier",
-                "source": ref_id,
-                "target": gen_id,
-                "sourceHandle": "image",
-                "targetHandle": "in"
-            }
-
-            encoded_ref = urllib.parse.quote(json.dumps([ref_id, "image"], separators=(',', ':')))
-            custom_tag = {
-                "type": "Custom",
-                "html": f'<span style="display: inline-block;"><span class="imageReference previewable" data-reference-id="{encoded_ref}" data-value="{{{{ref 1}}}}">{ref_label}</span></span>'
-            }
-
-            pattern = r'(@引用|@场景1|@参考图)'
-            if re.search(pattern, text_content):
-                final_prompt = re.sub(pattern, '{{ref 1}}', text_content)
-                parts = re.split(pattern, text_content)
-                for part in parts:
-                    if not part: continue
-                    if re.match(pattern, part): prompt_model_items.append(custom_tag)
-                    else: prompt_model_items.append({"type": "Write", "text": part})
-            else:
-                final_prompt = f"参考{{{{ref 1}}}}，{text_content}"
-                prompt_model_items = [{"type": "Write", "text": "参考"}, custom_tag, {"type": "Write", "text": f"，{text_content}"}]
+    if ref_node_info:
+        ref_id = ref_node_info["id"]
+        ref_label = ref_node_info["label"]
+        edge_to_add = {
+            "id": f"vueflow__edge-{ref_id}image-{gen_id}in",
+            "type": "simplebezier",
+            "source": ref_id, "target": gen_id,
+            "sourceHandle": "image", "targetHandle": "in"
+        }
+        encoded_ref = urllib.parse.quote(json.dumps([ref_id, "image"], separators=(',', ':')))
+        custom_tag = {
+            "type": "Custom",
+            "html": f'<span style="display: inline-block;"><span class="imageReference previewable" data-reference-id="{encoded_ref}" data-value="{{{{ref 1}}}}">{ref_label}</span></span>'
+        }
+        pattern = r'(@引用|@场景1|@参考图)'
+        if re.search(pattern, text_content):
+            final_prompt = re.sub(pattern, '{{ref 1}}', text_content)
+            parts = re.split(pattern, text_content)
+            for part in parts:
+                if not part: continue
+                if re.match(pattern, part): prompt_model_items.append(custom_tag)
+                else: prompt_model_items.append({"type": "Write", "text": part})
         else:
-            prompt_model_items = [{"type": "Write", "text": text_content}]
-
-        node = {
-            "id": gen_id, "type": "remote-imageGenerationNode", "position": {"x": x, "y": y},
-            "data": {
-                "label": label, "prompt": final_prompt, "promptModel": [prompt_model_items],
-                "model": model_str, "size": config['img_size'], "ratio": config['img_ratio'], "other": {},
-                "handles": [
-                    {"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "图片、文本输入"}, 
-                    {"id": "image", "type": "source", "dataType": "IMAGE", "label": "图片输出"}
-                ]
-            }
-        }
-        return node, edge_to_add
+            final_prompt = f"参考{{{{ref 1}}}}，{text_content}"
+            prompt_model_items = [{"type": "Write", "text": "参考"}, custom_tag, {"type": "Write", "text": f"，{text_content}"}]
     else:
-        node = {
-            "id": gen_id, "type": "remote-audioGenerationNode", "position": {"x": x, "y": y},
-            "data": {
-                "label": label, "prompt": text_content, "promptModel": [[{"type": "Write", "text": text_content}]],
-                "model": "", "language": "zh-CN", "sampleRate": 24000, "format": "wav", "other": {},
-                "handles": [
-                    {"id": "in", "type": "target", "dataType": ["IMAGE", "AUDIO", "STRING"], "label": "图片或音频限1个"}, 
-                    {"id": "audio", "type": "source", "dataType": "AUDIO", "label": "音频输出"}
-                ]
-            }
+        prompt_model_items = [{"type": "Write", "text": text_content}]
+
+    node = {
+        "id": gen_id, "type": "remote-imageGenerationNode", "position": {"x": x, "y": y},
+        "data": {
+            "label": label, "prompt": final_prompt, "promptModel": [prompt_model_items],
+            "model": model_str, "size": config['img_size'], "ratio": config['img_ratio'], "other": {},
+            "handles": [
+                {"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "图片、文本输入"}, 
+                {"id": "image", "type": "source", "dataType": "IMAGE", "label": "图片输出"}
+            ]
         }
-        return node, None
+    }
+    return node, edge_to_add
 
 def generate_toonflow_json(config, export_type="all"):
     gcp_key_str = get_secret("GCP_SA_KEY", "")
     creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(SHEET_EDIT_URL)
-    
     project = {"toonflowCanvas": True, "nodes": [], "edges": [], "viewport": {"x": 450, "y": 450, "zoom": 0.5}}
     current_y = -700
     
@@ -237,10 +211,8 @@ def generate_toonflow_json(config, export_type="all"):
             item_type, name = str(row.get("类型", "")).strip(), str(row.get("名称", "")).strip()
             if not name: continue
             prefix = f"{item_type}-{name}" if item_type else name
-            
             scene1_ref = None
             has_any_scene = False
-            
             for i in range(1, MAX_SCENE_COLUMNS + 1):
                 prompt = str(row.get(f"场景{i}", "")).strip()
                 if not prompt: continue
@@ -252,7 +224,6 @@ def generate_toonflow_json(config, export_type="all"):
                     scene1_ref = {"id": node["id"], "label": node_label}
                 else:
                     node, edge = create_standalone_node(node_label, prompt, "image", node_x, current_y, config, scene1_ref)
-                
                 project["nodes"].append(node)
                 if edge: project["edges"].append(edge)
             if has_any_scene: current_y += 420
@@ -281,7 +252,6 @@ def generate_toonflow_json(config, export_type="all"):
                 has_clip_node = True
                 
             if has_clip_node: current_y += 420
-
     return json.dumps(project, ensure_ascii=False, indent=2)
 
 # ==============================================================================
@@ -307,17 +277,73 @@ with col1:
             st.rerun()
 
     st.divider()
-    st.subheader("2. 导出 Toonflow 工程")
+    st.subheader("2. 导出视觉工程 JSON (Toonflow)")
     c1, c2 = st.columns(2)
     with c1: st.session_state.node_config['img_ratio'] = st.selectbox("比例", ["9:16", "16:9", "1:1", "3:4", "4:3"])
     with c2: st.session_state.node_config['img_size'] = st.selectbox("分辨率", ["1K", "2K"])
 
     if st.button("生成全剧 JSON", use_container_width=True):
         st.session_state["export_json"] = generate_toonflow_json(st.session_state.node_config, "all")
-        st.session_state["export_name"] = f"Toonflow_All_{int(time.time())}.json"
+        st.session_state["export_name"] = f"Toonflow_Visual_{int(time.time())}.json"
 
     if "export_json" in st.session_state:
         st.download_button(label="⬇️ 下载 JSON 文件", data=st.session_state["export_json"], file_name=st.session_state["export_name"], mime="application/json", type="primary", use_container_width=True)
+
+    st.divider()
+    st.subheader("3. 独立生成 CosyVoice 语音包")
+    
+    # 填入你本地部署的 CosyVoice API 地址，或云端 API 地址
+    COSYVOICE_API_URL = get_secret("COSYVOICE_API_URL", "http://127.0.0.1:50000/tts") 
+    
+    if st.button("🎙️ 生成并下载 CosyVoice 配音 (ZIP)", use_container_width=True):
+        with st.spinner("正在逐句请求 CosyVoice API，请耐心等待..."):
+            try:
+                gcp_key_str = get_secret("GCP_SA_KEY", "")
+                creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+                gc = gspread.authorize(creds)
+                sh = gc.open_by_url(SHEET_EDIT_URL)
+                script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
+                
+                zip_buffer = BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                    for idx, row in enumerate(script_records, start=1):
+                        voice_text = str(row.get("配音文字", "")).strip()
+                        if not voice_text: continue
+                            
+                        voice_actor = str(row.get("配音人物", "default")).strip()
+                        st.toast(f"正在请求第 {idx} 句配音...")
+                        
+                        # 请求体格式请根据你实际使用的 CosyVoice 接口文档调整
+                        payload = {
+                            "text": voice_text,
+                            "speaker": voice_actor
+                        }
+                        
+                        # 发送请求到 CosyVoice
+                        res = requests.post(COSYVOICE_API_URL, json=payload, timeout=60)
+                        
+                        if res.status_code == 200:
+                            filename = f"片段{str(row.get('序号', idx))}_{voice_actor}.wav"
+                            zip_file.writestr(filename, res.content)
+                        else:
+                            st.warning(f"第 {idx} 句失败，状态码: {res.status_code}")
+                
+                zip_buffer.seek(0)
+                st.session_state["audio_zip"] = zip_buffer
+                st.success("✅ 配音包生成完毕！")
+                
+            except Exception as e:
+                st.error(f"发生错误: {e}")
+
+    if "audio_zip" in st.session_state:
+        st.download_button(
+            label="⬇️ 下载配音 ZIP",
+            data=st.session_state["audio_zip"],
+            file_name=f"Dubbing_{int(time.time())}.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True
+        )
 
 with col2:
     st.subheader("📊 数据表预览")

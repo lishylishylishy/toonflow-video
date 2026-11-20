@@ -321,7 +321,6 @@ with col_b:
             st.success("已读取最新脚本！")
 
 if "script_data" in st.session_state:
-if "script_data" in st.session_state:
     dubbing_lines = [
         (raw_idx, row)
         for raw_idx, row in enumerate(st.session_state.script_data)

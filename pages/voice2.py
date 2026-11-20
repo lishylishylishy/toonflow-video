@@ -451,3 +451,21 @@ if df is not None and not df.empty:
                                     )
                                     fname = f"片段{seq}_背景_{safe_filename(cn_desc)}{ext}"
                                     old_ver = (
+                                        cached.get("ver", 0) if cached else 0
+                                    )
+                                    with open(audio_path, "rb") as f:
+                                        st.session_state["sfx_cache"][
+                                            row_key
+                                        ] = {
+                                            "filename": fname,
+                                            "bytes": f.read(),
+                                            "cn_desc": cn_desc,
+                                            "en_prompt": final_en,
+                                            "dur": dur,
+                                            "ver": old_ver + 1,
+                                        }
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"片段 {seq} 生成失败：{e}")
+else:
+    st.info("点击右上角「📥 读取最新表格与 Prompt」加载数据。")

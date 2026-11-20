@@ -1,18 +1,18 @@
+import base64
 from io import BytesIO
 import json
 import os
 import time
 import wave
 import zipfile
-from google import genai
-from google.genai import types
 from google.oauth2.service_account import Credentials
 import gspread
+import requests
 import streamlit as st
 
 st.set_page_config(page_title="Gemini AI 配音控制台", page_icon="🎙️", layout="wide")
 
-SHEET_EDIT_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
+DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
 TAB_NAME_SCRIPT = "toonflow-story-Script"
 
 GEMINI_TTS_MODELS = {
@@ -33,24 +33,37 @@ GEMINI_VOICES = {
 }
 
 
-def get_secret(key, default=""):
-    try:
-        return st.secrets[key] if key in st.secrets else os.getenv(key, default)
-    except Exception:
-        return os.getenv(key, default)
+def get_config(keys, default=""):
+    """优先读取主页面存入 session_state 的配置，其次读取 st.secrets 和环境变量"""
+    for k in keys:
+        if st.session_state.get(k):
+            return st.session_state[k]
+        try:
+            if k in st.secrets and st.secrets[k]:
+                return st.secrets[k]
+        except Exception:
+            pass
+        if os.getenv(k):
+            return os.getenv(k)
+    return default
 
 
 def fetch_script_data():
-    gcp_key_str = get_secret("GCP_SA_KEY", "")
+    sheet_url = get_config(
+        ["sheet_url", "SHEET_URL", "SHEET_EDIT_URL"], DEFAULT_SHEET_URL
+    )
+    gcp_key = get_config(["GCP_SA_KEY", "gcp_sa_key"])
+    creds_info = (
+        json.loads(gcp_key) if isinstance(gcp_key, str) else dict(gcp_key)
+    )
     creds = Credentials.from_service_account_info(
-        json.loads(gcp_key_str),
+        creds_info,
         scopes=[
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ],
     )
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_url(SHEET_EDIT_URL)
+    sh = gspread.authorize(creds).open_by_url(sheet_url)
     return sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
 
 
@@ -68,46 +81,45 @@ def ensure_wav_bytes(audio_bytes: bytes) -> bytes:
 
 def generate_audio_gemini(text, voice_id, instruct_text, model_id, api_key):
     try:
-        client = genai.Client(
-            api_key=api_key,
-            http_options={"api_version": "v1beta"},
-        )
         clean_instruct = str(instruct_text).strip()
-        if "3.8" in model_id and clean_instruct:
-            contents = types.Content(
-                role="user",
-                parts=[
-                    types.Part(
-                        text=text,
-                        speech_metadata=types.SpeechMetadata(
-                            style=clean_instruct
-                        ),
-                    )
-                ],
-            )
-        elif clean_instruct:
-            contents = f"STYLE: {clean_instruct}\n\n#### TRANSCRIPT\n{text}"
-        else:
-            contents = text
-
-        response = client.models.generate_content(
-            model=model_id,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name=voice_id
-                        )
-                    )
-                ),
-            ),
+        prompt_text = (
+            f"STYLE: {clean_instruct}\n\n#### TRANSCRIPT\n{text}"
+            if clean_instruct
+            else text
         )
 
-        for part in response.candidates[0].content.parts:
-            if getattr(part, "inline_data", None) and part.inline_data.data:
-                return ensure_wav_bytes(part.inline_data.data), True
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        }
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {"voiceName": voice_id}
+                    }
+                },
+            },
+        }
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if resp.status_code != 200:
+            return f"HTTP {resp.status_code}: {resp.text}", False
+
+        data = resp.json()
+        parts = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+        for part in parts:
+            inline = part.get("inlineData") or part.get("inline_data")
+            if inline and inline.get("data"):
+                raw_bytes = base64.b64decode(inline["data"])
+                return ensure_wav_bytes(raw_bytes), True
 
         return "模型未返回有效音频流。", False
     except Exception as e:
@@ -116,19 +128,21 @@ def generate_audio_gemini(text, voice_id, instruct_text, model_id, api_key):
 
 st.title("🎙️ Gemini AI 配音控制台")
 
-top_col1, top_col2 = st.columns(2)
-with top_col1:
-    GEMINI_API_KEY = st.text_input(
-        "🔑 Gemini API Key",
-        type="password",
-        value=get_secret("GEMINI_API_KEY", ""),
-    )
-with top_col2:
-    selected_model_label = st.selectbox(
-        "🤖 配音模型",
-        options=list(GEMINI_TTS_MODELS.keys()),
-    )
-    SELECTED_MODEL_ID = GEMINI_TTS_MODELS[selected_model_label]
+# 直接读取主页面已配置的 Gemini API Key
+GEMINI_API_KEY = get_config([
+    "GEMINI_API_KEY",
+    "gemini_api_key",
+    "GOOGLE_API_KEY",
+    "google_api_key",
+    "api_key",
+])
+if not GEMINI_API_KEY:
+    st.warning("未检测到主页面或 Secrets 中的 Gemini API Key，请先在主页面配置。")
+
+selected_model_label = st.selectbox(
+    "🤖 选择配音模型", options=list(GEMINI_TTS_MODELS.keys())
+)
+SELECTED_MODEL_ID = GEMINI_TTS_MODELS[selected_model_label]
 
 if st.button("📥 从表格读取最新配音脚本", use_container_width=True):
     with st.spinner("读取中..."):
@@ -189,7 +203,7 @@ if "script_data" in st.session_state:
                         "▶️ 试听此句", key=f"play_{idx}", use_container_width=True
                     ):
                         if not GEMINI_API_KEY:
-                            st.warning("请先输入 Gemini API Key！")
+                            st.error("缺少 Gemini API Key！")
                         else:
                             with st.spinner("生成中..."):
                                 audio_data, success = generate_audio_gemini(
@@ -224,7 +238,7 @@ if "script_data" in st.session_state:
             "📦 批量生成并打包 (ZIP)", type="primary", use_container_width=True
         ):
             if not GEMINI_API_KEY:
-                st.warning("请先输入 Gemini API Key！")
+                st.error("缺少 Gemini API Key！")
             else:
                 progress_bar = st.progress(0)
                 status_text = st.empty()

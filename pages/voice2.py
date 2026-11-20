@@ -99,19 +99,30 @@ def call_mmaudio_api(client: Client, candidate_apis: list, *args):
                     if isinstance(item, str) and os.path.exists(item):
                         return item
                     if isinstance(item, dict):
-                        p = item.get("path") or item.get("video") or item.get("audio")
+                        p = (
+                            item.get("path")
+                            or item.get("video")
+                            or item.get("audio")
+                        )
                         if p:
                             return p
                 return str(res[0])
             if isinstance(res, dict):
-                return res.get("path") or res.get("video") or res.get("audio") or str(res)
+                return (
+                    res.get("path")
+                    or res.get("video")
+                    or res.get("audio")
+                    or str(res)
+                )
             return res
-         except Exception as e:
-                last_err = e
-                if "quota" in str(e).lower():
-                    raise RuntimeError(f"ZeroGPU 算力受限（请检查 Token 是否为 Read 类型）：{e}")
-                if attempt < 2:
-                    time.sleep(3)
+        except Exception as e:
+            last_err = e
+            if "quota" in str(e).lower():
+                raise RuntimeError(
+                    f"ZeroGPU 算力受限（请检查 Token 是否为 Read 类型）：{e}"
+                )
+            if attempt < 2:
+                time.sleep(3)
     raise RuntimeError(f"MMAudio 接口调用失败: {last_err}")
 
 
@@ -179,14 +190,13 @@ GEMINI_API_KEY = get_config([
     "api_key",
 ])
 
-    if "sfx_cache" not in st.session_state:
-        st.session_state["sfx_cache"] = {}
+if "sfx_cache" not in st.session_state:
+    st.session_state["sfx_cache"] = {}
 
-
-    if GEMINI_API_KEY:
-        st.success("✅ 已加载 Gemini API Key")
-    else:
-        st.warning("⚠️ 未检测到 Gemini API Key")
+if GEMINI_API_KEY:
+    st.success("✅ 已加载 Gemini API Key")
+else:
+    st.warning("⚠️ 未检测到 Gemini API Key")
 
 c_info, c_btn = st.columns([3, 1])
 with c_info:
@@ -250,7 +260,7 @@ if df is not None and not df.empty:
             disabled=len(valid_rows) == 0,
         ):
             if not HF_TOKEN.strip():
-                st.error("请先在 Secrets 或左侧边栏填写 Hugging Face Token（hf_...）。")
+                st.error("请先在 Secrets 中配置 Hugging Face Token（HF_TOKEN）。")
             else:
                 tasks = []
                 for idx, (_, row) in enumerate(valid_rows.iterrows()):
@@ -390,7 +400,7 @@ if df is not None and not df.empty:
                         use_container_width=True,
                     ):
                         if not HF_TOKEN.strip():
-                            st.error("请先填写 Hugging Face Token（hf_...）。")
+                            st.error("请先配置 Hugging Face Token（HF_TOKEN）。")
                         else:
                             with st.spinner(f"正在生成片段 {seq}..."):
                                 try:
@@ -441,21 +451,3 @@ if df is not None and not df.empty:
                                     )
                                     fname = f"片段{seq}_背景_{safe_filename(cn_desc)}{ext}"
                                     old_ver = (
-                                        cached.get("ver", 0) if cached else 0
-                                    )
-                                    with open(audio_path, "rb") as f:
-                                        st.session_state["sfx_cache"][
-                                            row_key
-                                        ] = {
-                                            "filename": fname,
-                                            "bytes": f.read(),
-                                            "cn_desc": cn_desc,
-                                            "en_prompt": final_en,
-                                            "dur": dur,
-                                            "ver": old_ver + 1,
-                                        }
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"片段 {seq} 生成失败：{e}")
-else:
-    st.info("点击右上角「📥 读取最新表格与 Prompt」加载数据。")

@@ -285,14 +285,12 @@ with st.sidebar:
 # 🖥️ 【主界面渲染区（宽屏自上而下流式布局）】
 # ==============================================================================
 st.title("🎬 Auto Video Studio")
-st.caption("工作流：AI 解析写入 Google 表格 → 独立导出 Settings（定妆/定景） → 独立导出 Script（分镜画面与动态文本）")
-
 st.divider()
 
 # ------------------------------------------------------------------------------
-# 第一部分：AI 解析与写入
+# 第一部分：草稿解析
 # ------------------------------------------------------------------------------
-st.subheader("1. AI 解析与写入")
+st.subheader("1. 草稿解析")
 
 c_p1, c_p2 = st.columns([1.2, 1])
 with c_p1:
@@ -329,9 +327,9 @@ if st.button("🚀 解析并写入 Google 表格", type="primary", use_container
 st.divider()
 
 # ------------------------------------------------------------------------------
-# 第二部分：导出视觉工程 JSON (Toonflow) —— 单按钮一键生成并下载
+# 第二部分：导出 JSON (Toonflow) —— 单按钮一键生成并下载
 # ------------------------------------------------------------------------------
-st.subheader("2. 导出视觉工程 JSON (Toonflow)")
+st.subheader("2. 导出 JSON (Toonflow)")
 
 c_m, c_r, c_s = st.columns([2.2, 1, 1])
 with c_m:
@@ -359,7 +357,7 @@ st.write("")
 btn_c1, btn_c2 = st.columns(2, gap="medium")
 with btn_c1:
     st.download_button(
-        label="⬇️ 导出 Settings 工程 JSON（定妆 / 定景）",
+        label="⬇️ 导出 Settings（定妆 / 定景）",
         data=lambda: generate_toonflow_json(st.session_state.node_config, "settings"),
         file_name=f"Toonflow_Settings_{int(time.time())}.json",
         mime="application/json",
@@ -370,7 +368,7 @@ with btn_c1:
 
 with btn_c2:
     st.download_button(
-        label="⬇️ 导出 Script 工程 JSON（分镜画面与文本）",
+        label="⬇️ 导出 Script（分镜）",
         data=lambda: generate_toonflow_json(st.session_state.node_config, "script"),
         file_name=f"Toonflow_Script_{int(time.time())}.json",
         mime="application/json",

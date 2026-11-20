@@ -191,17 +191,6 @@ GEMINI_API_KEY = get_config([
 if "sfx_cache" not in st.session_state:
     st.session_state["sfx_cache"] = {}
 
-with st.sidebar:
-    st.header("🔑 密钥状态")
-    hf_token_input = st.text_input(
-        "Hugging Face Token",
-        value=HF_TOKEN,
-        type="password",
-        placeholder="hf_...",
-    )
-    if hf_token_input:
-        HF_TOKEN = hf_token_input
-        st.session_state["HF_TOKEN"] = hf_token_input
 
     if GEMINI_API_KEY:
         st.success("✅ 已加载 Gemini API Key")

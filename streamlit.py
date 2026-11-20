@@ -1,7 +1,7 @@
 import streamlit as st
 
 st.set_page_config(page_title="Auto Video Studio", page_icon="🎬", layout="wide", initial_sidebar_state="expanded")
-
+st.sidebar.success("侧边栏已激活")
 import requests, json, time, os, uuid, re
 import urllib.parse
 import gspread

@@ -291,7 +291,7 @@ def build_toonflow_json(config, settings_records, script_records, export_type="s
             for txt_col in ["背景动画", "人物动态", "标题文字"]:
                 val = str(row.get(txt_col, "")).strip()
                 if val:
-                    node = create_text_node(f"{seq_prefix}-{txt_col}", val, node_x, current_y)
+                    node, _ = create_image_node(f"{seq_prefix}-{txt_col}", val, node_x, current_y, config)
                     project["nodes"].append(node)
                     node_x += 420
                     has_clip_node = True

@@ -6,13 +6,10 @@ import requests, json, time, os, uuid, re
 import urllib.parse
 import gspread
 from google.oauth2.service_account import Credentials
-import zipfile
-from io import BytesIO
 
 # ==============================================================================
-# ⚙️ 【一、 全局集中配置区】
+# ⚙️ 【全局配置区】
 # ==============================================================================
-
 SHEET_EDIT_URL  = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
 SHEET_EMBED_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/htmlview"
 
@@ -51,17 +48,9 @@ def fetch_prompts_from_sheet():
         return prompts if prompts else {"默认": "请在 prompt 表格中添加数据。"}
     except Exception as e: return {"读取错误": f"读取 prompt 表格失败: {e}"}
 
-def fetch_script_data():
-    gcp_key_str = get_secret("GCP_SA_KEY", "")
-    creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_url(SHEET_EDIT_URL)
-    return sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
-
 # ==============================================================================
-# 🎨 【二、 Streamlit 初始化】
+# 🎨 【Streamlit 初始化】
 # ==============================================================================
-
 st.markdown("""
     <style>
         #MainMenu, footer { visibility: hidden; }
@@ -85,9 +74,8 @@ if 'node_config' not in st.session_state:
     }
 
 # ==============================================================================
-# 🤖 【三、 核心逻辑：AI 解析与写入 & Toonflow 转换】
+# 🤖 【核心逻辑：AI 解析与写入 & Toonflow 转换】
 # ==============================================================================
-
 def call_gemini_json(prompt_text, model_name):
     gemini_key = get_secret("GEMINI_API_KEY", "")
     payload = {"contents": [{"parts": [{"text": prompt_text}]}], "generationConfig": {"response_mime_type": "application/json"}}
@@ -242,9 +230,8 @@ def generate_toonflow_json(config, export_type="all"):
     return json.dumps(project, ensure_ascii=False, indent=2)
 
 # ==============================================================================
-# 🖥️ 【四、 UI 界面渲染区】
+# 🖥️ 【UI 界面渲染区】
 # ==============================================================================
-
 st.title("🎬 Auto Video Studio")
 
 col1, col2 = st.columns([1, 1.5], gap="large")
@@ -275,103 +262,6 @@ with col1:
 
     if "export_json" in st.session_state:
         st.download_button(label="⬇️ 下载 JSON 文件", data=st.session_state["export_json"], file_name=st.session_state["export_name"], mime="application/json", type="primary", use_container_width=True)
-
-    st.divider()
-    st.subheader("3. 🎙️ CosyVoice 配音控制台")
-    
-    # CosyVoice API 地址
-    COSYVOICE_API_URL = get_secret("COSYVOICE_API_URL", "http://127.0.0.1:50000/tts") 
-    
-    if st.button("📥 从表格读取最新配音脚本", use_container_width=True):
-        st.session_state.script_data = fetch_script_data()
-        st.success("已读取！")
-
-    if "script_data" in st.session_state:
-        script_records = st.session_state.script_data
-        # 过滤出有配音文字的行
-        dubbing_lines = [row for row in script_records if str(row.get("配音文字", "")).strip()]
-        
-        if not dubbing_lines:
-            st.info("表格中没有检测到配音文字。")
-        else:
-            # 步骤 A：角色映射
-            st.markdown("##### A. 角色分配音色 ID")
-            unique_chars = list(set([str(row.get("配音人物", "旁白")).strip() or "旁白" for row in dubbing_lines]))
-            char_voice_map = {}
-            map_cols = st.columns(min(len(unique_chars), 3))
-            
-            for i, char in enumerate(unique_chars):
-                with map_cols[i % 3]:
-                    # 默认给定一个基础值，用户可以根据本地 CosyVoice 注册的 speaker 修改
-                    char_voice_map[char] = st.text_input(f"【{char}】对应的音色", value="中文女", key=f"voice_map_{char}")
-
-            st.markdown("---")
-            st.markdown("##### B. 逐句调试与生成")
-            
-            for idx, row in enumerate(dubbing_lines):
-                seq = str(row.get("序号", idx + 1)).strip()
-                char = str(row.get("配音人物", "旁白")).strip() or "旁白"
-                text = str(row.get("配音文字", "")).strip()
-                tone = str(row.get("配音语气", "")).strip()
-                
-                # 拼接语气词。如果你使用的是 Instruct 模型，可以改成 <|语气|>文本 格式
-                # 这里默认展示拼接效果，用户肉眼可见，且可手动在下方编辑框修改
-                default_prompt = f"【{tone}】{text}" if tone else text
-                
-                with st.expander(f"片段 {seq} - {char} : {text[:15]}..."):
-                    uc1, uc2 = st.columns([3, 1])
-                    with uc1:
-                        target_voice = char_voice_map.get(char, "中文女")
-                        st.caption(f"当前发音人识别为: **{target_voice}**")
-                        # 将最终要发给模型的文本呈现出来，允许用户修改
-                        final_prompt = st.text_area("将发送给 CosyVoice 的文本", value=default_prompt, key=f"prompt_{idx}", height=68)
-                    
-                    with uc2:
-                        st.write("") # 占位对齐
-                        if st.button("▶️ 试听此句", key=f"play_{idx}", use_container_width=True):
-                            with st.spinner("生成中..."):
-                                try:
-                                    payload = {"text": final_prompt, "speaker": target_voice}
-                                    res = requests.post(COSYVOICE_API_URL, json=payload, timeout=30)
-                                    if res.status_code == 200:
-                                        st.session_state[f"audio_{idx}"] = res.content
-                                    else:
-                                        st.error(f"报错: {res.status_code}")
-                                except Exception as e:
-                                    st.error(f"连接失败: {e}")
-                    
-                    # 如果生成过音频，就在展开面板里显示播放器
-                    if f"audio_{idx}" in st.session_state:
-                        st.audio(st.session_state[f"audio_{idx}"], format="audio/wav")
-
-            st.markdown("---")
-            st.markdown("##### C. 确认无误，一键打包")
-            if st.button("📦 按照上述设置批量生成并打包 (ZIP)", type="primary", use_container_width=True):
-                with st.spinner("正在后台批量生成所有台词，请耐心等待..."):
-                    zip_buffer = BytesIO()
-                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                        for idx, row in enumerate(dubbing_lines):
-                            seq = str(row.get("序号", idx + 1)).strip()
-                            char = str(row.get("配音人物", "旁白")).strip() or "旁白"
-                            target_voice = char_voice_map.get(char, "中文女")
-                            # 从上面对应输入框读取最新修改的文本
-                            final_prompt = st.session_state.get(f"prompt_{idx}", row.get("配音文字", ""))
-                            
-                            payload = {"text": final_prompt, "speaker": target_voice}
-                            try:
-                                res = requests.post(COSYVOICE_API_URL, json=payload, timeout=60)
-                                if res.status_code == 200:
-                                    filename = f"片段{seq}_{char}.wav"
-                                    zip_file.writestr(filename, res.content)
-                            except:
-                                pass # 批量打包时忽略单个错误继续执行
-                    
-                    zip_buffer.seek(0)
-                    st.session_state["final_audio_zip"] = zip_buffer
-                    st.success("打包完成！")
-            
-            if "final_audio_zip" in st.session_state:
-                st.download_button("⬇️ 下载全剧配音包", data=st.session_state["final_audio_zip"], file_name=f"Dubbing_{int(time.time())}.zip", mime="application/zip", use_container_width=True)
 
 with col2:
     st.subheader("📊 数据表预览")

@@ -1,10 +1,8 @@
 import base64
 from io import BytesIO
 import json
-import math
 import os
 import re
-import struct
 import time
 import wave
 import zipfile
@@ -79,7 +77,15 @@ def get_config(keys, default=""):
 
 
 def safe_filename(name: str) -> str:
-    return re.sub(r'[\\/:*?"<>|\s]+', "_", str(name).strip())
+    return re.sub(r'[\\/:*?"<>|]+', "_", str(name).strip())
+
+
+def get_wav_duration(wav_bytes: bytes) -> float:
+    try:
+        with wave.open(BytesIO(wav_bytes), "rb") as wf:
+            return wf.getnframes() / float(wf.getframerate())
+    except Exception:
+        return 0.0
 
 
 def fetch_script_data():
@@ -113,222 +119,67 @@ def ensure_wav_bytes(audio_bytes: bytes) -> bytes:
     return wav_buffer.getvalue()
 
 
-def _pack_pcm_to_wav(
-    pcm_samples, framerate=24000, nchannels=1, sampwidth=2
-) -> bytes:
-    buf = BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(nchannels)
-        wf.setsampwidth(sampwidth)
-        wf.setframerate(framerate)
-        wf.writeframes(struct.pack(f"<{len(pcm_samples)}h", *pcm_samples))
-    return buf.getvalue()
-
-
-def split_wav_to_segments(wav_bytes: bytes, expected_count: int) -> list[bytes]:
-    """根据句间 <long pause> 停顿，将合批生成的整条 WAV 切分为 expected_count 条独立单句音频"""
-    if expected_count <= 1:
-        return [wav_bytes]
-
-    with wave.open(BytesIO(wav_bytes), "rb") as wf:
-        nchannels = wf.getnchannels()
-        sampwidth = wf.getsampwidth()
-        framerate = wf.getframerate()
-        frames = wf.readframes(wf.getnframes())
-
-    if sampwidth != 2 or nchannels != 1:
-        return [wav_bytes]
-
-    total_samples = len(frames) // 2
-    if total_samples == 0:
-        return [wav_bytes]
-
-    samples = struct.unpack(f"<{total_samples}h", frames)
-    win_size = max(1, int(framerate * 0.02))  # 20ms 窗口
-    num_wins = total_samples // win_size
-    if num_wins < expected_count * 5:
-        return [wav_bytes]
-
-    rms_list = [
-        math.sqrt(
-            sum(
-                s * s
-                for s in samples[w * win_size : (w + 1) * win_size]
-            )
-            / win_size
-        )
-        for w in range(num_wins)
-    ]
-    peak_ref = sorted(rms_list)[int(num_wins * 0.90)]
-
-    def find_gaps(thresh_ratio, min_win_len):
-        thresh = max(150.0, peak_ref * thresh_ratio)
-        gaps = []
-        in_sil = False
-        g_start = 0
-        for w, r in enumerate(rms_list):
-            if r <= thresh:
-                if not in_sil:
-                    in_sil = True
-                    g_start = w
-            else:
-                if in_sil:
-                    in_sil = False
-                    if g_start > 2 and (w - g_start) >= min_win_len:
-                        gaps.append((g_start, w))
-        return gaps
-
-    # 优先匹配 >=240ms 的长停顿；不足时自动放宽至 >=100ms 停顿
-    silent_gaps = find_gaps(0.03, 12)
-    if len(silent_gaps) < expected_count - 1:
-        silent_gaps = find_gaps(0.05, 5)
-
-    if len(silent_gaps) < expected_count - 1:
-        return [wav_bytes]
-
-    top_gaps = sorted(silent_gaps, key=lambda g: (g[1] - g[0]), reverse=True)[
-        : expected_count - 1
-    ]
-    top_gaps.sort(key=lambda g: g[0])
-
-    pad_samples = 8 * win_size  # 边界留白 0.16s 防吞字
-    split_indices = (
-        [0]
-        + [((g[0] + g[1]) // 2) * win_size for g in top_gaps]
-        + [total_samples]
-    )
-
-    return [
-        _pack_pcm_to_wav(
-            samples[
-                max(0, split_indices[i] - (pad_samples if i > 0 else 0)) : min(
-                    total_samples,
-                    split_indices[i + 1]
-                    + (pad_samples if i < len(split_indices) - 2 else 0),
-                )
-            ],
-            framerate,
-            nchannels,
-            sampwidth,
-        )
-        for i in range(len(split_indices) - 1)
-    ]
-
-
-def group_segments_for_batch(segments, max_chars=2500):
-    """按相邻最多 2 个不重复角色自动合批（≤2 角色时整剧合并为 1 次请求）"""
-    batches = []
-    current_batch = []
-    current_speakers = set()
-    current_chars = 0
-
+def group_consecutive_by_speaker(segments: list[dict]) -> list[dict]:
+    """
+    核心分组逻辑：前后连续为同一配音人物的片段合并为一组；一旦换人立即切断开启新组。
+    每组只发 1 次 API 请求，直接生成一个完整音频文件，不做任何音频裁剪。
+    """
+    groups = []
     for seg in segments:
-        spk = seg["char"]
-        text_len = len(seg["text"])
-        next_speakers = current_speakers | {spk}
-
-        if current_batch and (
-            len(next_speakers) > 2 or current_chars + text_len > max_chars
-        ):
-            batches.append(current_batch)
-            current_batch = [seg]
-            current_speakers = {spk}
-            current_chars = text_len
+        if groups and groups[-1]["char"] == seg["char"]:
+            groups[-1]["items"].append(seg)
+            groups[-1]["end_seq"] = seg["seq"]
         else:
-            current_batch.append(seg)
-            current_speakers = next_speakers
-            current_chars += text_len
+            groups.append({
+                "char": seg["char"],
+                "start_seq": seg["seq"],
+                "end_seq": seg["seq"],
+                "items": [seg],
+            })
 
-    if current_batch:
-        batches.append(current_batch)
-    return batches
+    for g_idx, grp in enumerate(groups):
+        if grp["start_seq"] == grp["end_seq"]:
+            title = f"片段{grp['start_seq']}（{grp['char']}）"
+        else:
+            title = f"片段{grp['start_seq']}-{grp['end_seq']}（{grp['char']}）"
+        grp["group_idx"] = g_idx
+        grp["title"] = title
+        grp["filename"] = f"{safe_filename(title)}.wav"
+    return groups
 
 
-def generate_and_split_segments(segments, char_voice_map, model_id, api_key):
-    """发送 1 次 API 请求生成整批台词，并自动切分为独立 WAV 文件列表返回"""
+def generate_single_speaker_group(
+    group_items: list[dict], voice_id: str, model_id: str, api_key: str
+):
+    """为同一角色的连续片段发送 1 次单音色 API 请求，保留每句独立导演语气"""
     try:
-        unique_speakers = list(dict.fromkeys([s["char"] for s in segments]))
         base_style = "中国大陆普通话，自然口语化，富有短剧戏剧张力"
         is_38 = "3.8" in model_id
-        total_segs = len(segments)
 
-        def with_pause(raw_txt, index):
-            if total_segs <= 1 or index == total_segs - 1:
-                return raw_txt
-            return (
-                f"{raw_txt} <long pause>" if is_38 else f"{raw_txt} ... ... "
-            )
-
-        if len(unique_speakers) == 1:
-            spk = unique_speakers[0]
-            speech_config = {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {"voiceName": char_voice_map[spk]}
+        if is_38:
+            parts = [
+                {
+                    "text": item["text"],
+                    "speechMetadata": {
+                        "style": (
+                            f"{base_style}，{item['tone']}"
+                            if item["tone"]
+                            else base_style
+                        )
+                    },
                 }
-            }
-            if is_38:
-                parts = [
-                    {
-                        "text": with_pause(s["text"], idx),
-                        "speechMetadata": {
-                            "style": (
-                                f"{base_style}，{s['tone']}"
-                                if s["tone"]
-                                else base_style
-                            )
-                        },
-                    }
-                    for idx, s in enumerate(segments)
-                ]
-            else:
-                parts = [
-                    {
-                        "text": "\n\n".join([
-                            f"STYLE: {base_style}，{s['tone']}\n{with_pause(s['text'], idx)}"
-                            for idx, s in enumerate(segments)
-                        ])
-                    }
-                ]
+                for item in group_items
+            ]
         else:
-            speech_config = {
-                "multiSpeakerVoiceConfig": {
-                    "speakerVoiceConfigs": [
-                        {
-                            "speaker": spk,
-                            "voiceConfig": {
-                                "prebuiltVoiceConfig": {
-                                    "voiceName": char_voice_map[spk]
-                                }
-                            },
-                        }
-                        for spk in unique_speakers
-                    ]
-                }
-            }
-            if is_38:
-                parts = [
-                    {
-                        "text": with_pause(s["text"], idx),
-                        "speechMetadata": {
-                            "speaker": s["char"],
-                            "style": (
-                                f"{base_style}，{s['tone']}"
-                                if s["tone"]
-                                else base_style
-                            ),
-                        },
-                    }
-                    for idx, s in enumerate(segments)
-                ]
-            else:
-                parts = [
-                    {
-                        "text": "\n".join([
-                            f"{s['char']}: {with_pause(s['text'], idx)}"
-                            for idx, s in enumerate(segments)
-                        ])
-                    }
-                ]
+            merged_lines = [
+                (
+                    f"STYLE: {base_style}，{item['tone']}\n{item['text']}"
+                    if item["tone"]
+                    else item["text"]
+                )
+                for item in group_items
+            ]
+            parts = [{"text": "\n\n".join(merged_lines)}]
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
         headers = {
@@ -339,7 +190,11 @@ def generate_and_split_segments(segments, char_voice_map, model_id, api_key):
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
-                "speechConfig": speech_config,
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {"voiceName": voice_id}
+                    }
+                },
             },
         }
 
@@ -356,21 +211,21 @@ def generate_and_split_segments(segments, char_voice_map, model_id, api_key):
         for part in resp_parts:
             inline = part.get("inlineData") or part.get("inline_data")
             if inline and inline.get("data"):
-                full_wav = ensure_wav_bytes(base64.b64decode(inline["data"]))
-                return split_wav_to_segments(full_wav, total_segs), True
+                return ensure_wav_bytes(base64.b64decode(inline["data"])), True
 
         return "模型未返回有效音频流。", False
     except Exception as e:
         return str(e), False
 
 
-def build_zip_from_cache(audio_cache: dict) -> bytes:
-    """纯本地打包网页中已缓存的独立 WAV 文件（不发送任何 API 请求）"""
+def build_zip_from_cache(audio_cache: dict, groups: list[dict]) -> bytes:
+    """纯本地打包当前所有已缓存的分组 WAV 文件（不发送任何 API 请求）"""
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for idx in sorted(audio_cache.keys()):
-            item = audio_cache[idx]
-            zf.writestr(item["filename"], item["bytes"])
+        for grp in groups:
+            cached = audio_cache.get(grp["group_idx"])
+            if cached:
+                zf.writestr(grp["filename"], cached["bytes"])
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
 
@@ -407,7 +262,7 @@ with col_b:
     if st.button("📥 从表格读取最新配音脚本", use_container_width=True):
         with st.spinner("读取中..."):
             st.session_state.script_data = fetch_script_data()
-            st.session_state["audio_cache"] = {}  # 读取新脚本时清空旧缓存
+            st.session_state["audio_cache"] = {}
             st.success("已读取最新脚本！")
 
 if "script_data" in st.session_state:
@@ -420,9 +275,7 @@ if "script_data" in st.session_state:
     if not dubbing_lines:
         st.info("表格中没有检测到配音文字。")
     else:
-        # ----------------------------------------------------------------------
-        # 1. 按表格「配音人物」自动去重并严格绑定音色
-        # ----------------------------------------------------------------------
+        # 1. 按表格「配音人物」去重并严格绑定音色
         st.markdown("### 1. 角色音色绑定（已按表格「配音人物」自动去重）")
         unique_chars = list(
             dict.fromkeys([
@@ -453,10 +306,7 @@ if "script_data" in st.session_state:
                 st.session_state["char_voice_binding"][char] = chosen_label
                 STRICT_CHAR_VOICE_MAP[char] = GEMINI_VOICES[chosen_label]
 
-        # ----------------------------------------------------------------------
-        # 2. 一键批量生成全部独立片段（缓存在网页中）
-        # ----------------------------------------------------------------------
-        st.markdown("---")
+        # 读取界面上可能微调过的台词和语气，并按连续同角色自动分组
         all_segments = []
         for idx, row in enumerate(dubbing_lines):
             seq = str(row.get("序号", idx + 1)).strip()
@@ -473,15 +323,17 @@ if "script_data" in st.session_state:
                 ),
             })
 
-        batches = group_segments_for_batch(all_segments)
-        st.markdown("### 2. 生成配音（生成后自动缓存在网页，支持单句覆盖重做）")
+        groups = group_consecutive_by_speaker(all_segments)
+
+        # 2. 一键批量生成全部分组
+        st.markdown("---")
+        st.markdown("### 2. 生成配音（连续同角色合并一次生成，换人自动切断）")
         st.caption(
-            f"当前共 {len(all_segments)} 个片段、{len(unique_chars)} 个角色（{', '.join(unique_chars)}），"
-            f"将自动合并为 **{len(batches)} 次 API 请求**生成并切分为 {len(all_segments)} 个独立音频文件。"
+            f"共 {len(all_segments)} 个片段，已按连续同角色自动合并为 **{len(groups)} 组**（共消耗 **{len(groups)} 次 API 请求**，不裁剪音频、零错位）。"
         )
 
         if st.button(
-            f"🚀 一键生成全部 {len(all_segments)} 个独立配音文件",
+            f"🚀 一键生成全部 {len(groups)} 组配音文件",
             type="primary",
             use_container_width=True,
         ):
@@ -490,143 +342,141 @@ if "script_data" in st.session_state:
             else:
                 progress = st.progress(0)
                 status = st.empty()
-                for b_idx, batch in enumerate(batches):
-                    spks = "&".join(
-                        list(dict.fromkeys([x["char"] for x in batch]))
-                    )
+                for g_idx, grp in enumerate(groups):
                     status.text(
-                        f"正在发送第 {b_idx + 1}/{len(batches)} 次 API 请求（片段 {batch[0]['seq']}~{batch[-1]['seq']}：{spks}）..."
+                        f"正在发送第 {g_idx + 1}/{len(groups)} 次 API 请求：{grp['title']}..."
                     )
+                    voice_id = STRICT_CHAR_VOICE_MAP[grp["char"]]
 
-                    clips, success = generate_and_split_segments(
-                        batch,
-                        STRICT_CHAR_VOICE_MAP,
-                        SELECTED_MODEL_ID,
-                        GEMINI_API_KEY,
+                    wav_data, success = generate_single_speaker_group(
+                        grp["items"], voice_id, SELECTED_MODEL_ID, GEMINI_API_KEY
                     )
                     if success:
-                        if len(clips) == len(batch):
-                            for seg_item, wav_data in zip(batch, clips):
-                                fname = f"片段{safe_filename(seg_item['seq'])}_{safe_filename(seg_item['char'])}.wav"
-                                st.session_state["audio_cache"][
-                                    seg_item["idx"]
-                                ] = {
-                                    "filename": fname,
-                                    "bytes": wav_data,
-                                }
-                        else:
-                            # 极端情况下未检测到足够停顿，兜底逐句补齐确保每个片段独立
-                            for seg_item in batch:
-                                single_clip, ok = generate_and_split_segments(
-                                    [seg_item],
-                                    STRICT_CHAR_VOICE_MAP,
-                                    SELECTED_MODEL_ID,
-                                    GEMINI_API_KEY,
-                                )
-                                if ok:
-                                    fname = f"片段{safe_filename(seg_item['seq'])}_{safe_filename(seg_item['char'])}.wav"
-                                    st.session_state["audio_cache"][
-                                        seg_item["idx"]
-                                    ] = {
-                                        "filename": fname,
-                                        "bytes": single_clip[0],
-                                    }
+                        st.session_state["audio_cache"][g_idx] = {
+                            "filename": grp["filename"],
+                            "bytes": wav_data,
+                        }
                     else:
-                        st.error(f"第 {b_idx + 1} 批请求失败：{clips}")
+                        st.error(f"{grp['title']} 生成失败：{wav_data}")
 
-                    progress.progress((b_idx + 1) / len(batches))
-                    # 仅当总请求次数超过免费版 3 次/分限制时才自动间隔
-                    if len(batches) > 3 and b_idx < len(batches) - 1:
+                    progress.progress((g_idx + 1) / len(groups))
+                    if len(groups) > 3 and g_idx < len(groups) - 1:
+                        status.text(
+                            "为避免触发免费版 3次/分钟 频率限制，等待 21 秒后继续..."
+                        )
                         time.sleep(21)
 
-                status.text("全部生成并缓存完成！可在下方逐条试听或单独覆盖重做。")
+                status.text("全部生成并缓存在网页中！")
                 st.success(
-                    f"已成功缓存 {len(st.session_state['audio_cache'])}/{len(all_segments)} 个独立配音文件！"
+                    f"已成功生成 {len(st.session_state['audio_cache'])}/{len(groups)} 组配音文件！"
                 )
 
-        # ----------------------------------------------------------------------
-        # 3. 逐片段试听与单独覆盖重做
-        # ----------------------------------------------------------------------
+        # 3. 按分组展示明细，支持修改台词后单独覆盖重做
         st.markdown("---")
-        st.markdown("### 3. 片段明细（支持单独发送请求覆盖重做）")
+        st.markdown("### 3. 配音分组明细（支持修改任意句子后单独覆盖重做）")
 
-        for seg in all_segments:
-            idx = seg["idx"]
-            seq = seg["seq"]
-            char = seg["char"]
+        for grp in groups:
+            g_idx = grp["group_idx"]
+            char = grp["char"]
             bound_voice = STRICT_CHAR_VOICE_MAP[char]
-            cached_item = st.session_state["audio_cache"].get(idx)
-            status_badge = (
-                f"✅ 已缓存 `{cached_item['filename']}`"
-                if cached_item
-                else "⚪ 待生成"
-            )
+            cached_item = st.session_state["audio_cache"].get(g_idx)
+
+            if cached_item:
+                dur = get_wav_duration(cached_item["bytes"])
+                badge = f"✅ 已缓存 `{grp['filename']}` (⏱️ {dur:.1f}s)"
+            else:
+                badge = "⚪ 待生成"
 
             with st.expander(
-                f"片段 {seq} ｜【{char}】({bound_voice}) ｜ 语气：{seg['tone'] or '默认'} ｜ {status_badge}",
-                expanded=bool(cached_item),
+                f"📁 {grp['title']} ｜ 绑定音色: {bound_voice} ｜ 共 {len(grp['items'])} 句 ｜ {badge}",
+                expanded=True,
             ):
-                c1, c2 = st.columns([3.5, 1])
-                with c1:
-                    new_tone = st.text_input(
-                        "🎭 配音语气", value=seg["tone"], key=f"instruct_{idx}"
-                    )
-                    new_text = st.text_area(
-                        "📝 配音文字",
-                        value=seg["text"],
-                        key=f"prompt_{idx}",
-                        height=68,
-                    )
-                with c2:
-                    st.write("")
-                    btn_label = (
+                # 展示该组内包含的每一句（可独立修改语气和台词）
+                for item in grp["items"]:
+                    s_idx = item["idx"]
+                    c_seq, c_tone, c_txt = st.columns([0.6, 1.4, 3.0])
+                    with c_seq:
+                        st.markdown(f"**片段 {item['seq']}**")
+                    with c_tone:
+                        st.text_input(
+                            "配音语气",
+                            value=item["tone"],
+                            key=f"instruct_{s_idx}",
+                            label_visibility="collapsed",
+                            placeholder="配音语气",
+                        )
+                    with c_txt:
+                        st.text_area(
+                            "配音文字",
+                            value=item["text"],
+                            key=f"prompt_{s_idx}",
+                            height=52,
+                            label_visibility="collapsed",
+                        )
+
+                # 组操作栏：左边试听已缓存音频，右边单独重新生成并覆盖
+                ac1, ac2 = st.columns([3.5, 1])
+                with ac1:
+                    if cached_item:
+                        st.audio(cached_item["bytes"], format="audio/wav")
+                    else:
+                        st.caption("尚未生成此组音频")
+                with ac2:
+                    btn_text = (
                         "🔄 重新生成并覆盖"
                         if cached_item
-                        else "▶️ 单独生成此片段"
+                        else "▶️ 单独生成此组"
                     )
                     if st.button(
-                        btn_label, key=f"regen_{idx}", use_container_width=True
+                        btn_text,
+                        key=f"regen_grp_{g_idx}",
+                        use_container_width=True,
                     ):
                         if not GEMINI_API_KEY:
                             st.error("缺少 Gemini API Key！")
                         else:
-                            with st.spinner(f"正在生成片段 {seq}..."):
-                                single_seg = [{
-                                    "idx": idx,
-                                    "seq": seq,
-                                    "char": char,
-                                    "text": new_text,
-                                    "tone": new_tone,
-                                }]
-                                clips, success = generate_and_split_segments(
-                                    single_seg,
-                                    STRICT_CHAR_VOICE_MAP,
-                                    SELECTED_MODEL_ID,
-                                    GEMINI_API_KEY,
+                            # 收集最新编辑后的组内台词
+                            latest_items = [
+                                {
+                                    "idx": it["idx"],
+                                    "seq": it["seq"],
+                                    "char": it["char"],
+                                    "tone": st.session_state.get(
+                                        f"instruct_{it['idx']}", it["tone"]
+                                    ),
+                                    "text": st.session_state.get(
+                                        f"prompt_{it['idx']}", it["text"]
+                                    ),
+                                }
+                                for it in grp["items"]
+                            ]
+                            with st.spinner(f"正在生成 {grp['title']}..."):
+                                wav_data, success = (
+                                    generate_single_speaker_group(
+                                        latest_items,
+                                        bound_voice,
+                                        SELECTED_MODEL_ID,
+                                        GEMINI_API_KEY,
+                                    )
                                 )
                                 if success:
-                                    fname = f"片段{safe_filename(seq)}_{safe_filename(char)}.wav"
-                                    # 新音频直接覆盖旧缓存
-                                    st.session_state["audio_cache"][idx] = {
-                                        "filename": fname,
-                                        "bytes": clips[0],
+                                    st.session_state["audio_cache"][g_idx] = {
+                                        "filename": grp["filename"],
+                                        "bytes": wav_data,
                                     }
                                     st.rerun()
                                 else:
-                                    st.error(f"生成失败: {clips}")
+                                    st.error(f"生成失败: {wav_data}")
 
-                if cached_item:
-                    st.audio(cached_item["bytes"], format="audio/wav")
-
-        # ----------------------------------------------------------------------
-        # 4. 纯本地一键下载（不触发任何 API 请求）
-        # ----------------------------------------------------------------------
+        # 4. 纯本地一键打包下载（0 次 API 请求）
         st.markdown("---")
         cached_count = len(st.session_state["audio_cache"])
         if cached_count > 0:
-            zip_bytes = build_zip_from_cache(st.session_state["audio_cache"])
+            zip_bytes = build_zip_from_cache(
+                st.session_state["audio_cache"], groups
+            )
             st.download_button(
-                label=f"⬇️ 一键打包下载已生成的 {cached_count} 个独立配音文件 (ZIP，不消耗 API)",
+                label=f"⬇️ 一键打包下载已生成的 {cached_count} 个配音文件 (ZIP，不消耗 API)",
                 data=zip_bytes,
                 file_name=f"Dubbing_{int(time.time())}.zip",
                 mime="application/zip",
@@ -635,5 +485,5 @@ if "script_data" in st.session_state:
             )
         else:
             st.info(
-                "尚未生成任何音频，点击上方「一键生成全部」或「单独生成」后，此处将出现打包下载按钮。"
+                "尚未生成任何音频，点击上方「一键生成全部」或「单独生成此组」后，此处将出现打包下载按钮。"
             )

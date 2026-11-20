@@ -1,6 +1,6 @@
 import streamlit as st
 
-st.set_page_config(page_title="Auto Video Studio", page_icon="🎬", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Auto Video Studio", page_icon="🎬", layout="wide", initial_sidebar_state="expanded")
 import requests, json, time, os, uuid, re
 import urllib.parse
 import gspread
@@ -18,7 +18,7 @@ TAB_NAME_PROMPT = "prompt"
 
 MAX_SCENE_COLUMNS = 5 
 SETTINGS_HEADERS = ["类型", "名称"] + [f"场景{i}" for i in range(1, MAX_SCENE_COLUMNS + 1)]
-SCRIPT_HEADERS = ["序号", "片段", "片段时长","背景图", "背景动画", "人物", "人物动态", "标题文字", "配音人物", "配音语气", "配音文字", "背景音"]
+SCRIPT_HEADERS = ["序号", "片段", "片段时长", "背景图", "背景动画", "人物", "人物动态", "标题文字", "配音人物", "配音语气", "配音文字", "背景音"]
 
 RECOMMENDED_MODELS = {
     "gemini-3.5-flash-lite": "⚡ gemini-3.5-flash-lite (推荐！)",
@@ -54,13 +54,17 @@ def fetch_prompts_from_sheet():
     except Exception as e: return {"读取错误": f"读取 prompt 表格失败: {e}"}
 
 # ==============================================================================
-# 🎨 【Streamlit 初始化】
+# 🎨 【Streamlit 样式初始化】
 # ==============================================================================
 st.markdown("""
     <style>
         footer { visibility: hidden; }
         header[data-testid="stHeader"] { background-color: transparent !important; }
-        .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important; }
+        .block-container {
+            max-width: 1200px !important;
+            padding-top: 2rem !important;
+            padding-bottom: 2.5rem !important;
+        }
         iframe { border-radius: 8px; border: 1px solid #e0e0e0; }
     </style>
 """, unsafe_allow_html=True)
@@ -78,7 +82,7 @@ if 'node_config' not in st.session_state:
     }
 
 # ==============================================================================
-# 🤖 【核心逻辑：AI 解析与写入 & Toonflow 转换】
+# 🤖 【核心逻辑：AI 解析与写入 & Toonflow 节点构建】
 # ==============================================================================
 def call_gemini_json(prompt_text, model_name):
     gemini_key = get_secret("GEMINI_API_KEY", "")
@@ -134,7 +138,8 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
             ws_script.append_row(SCRIPT_HEADERS)
         ws_script.append_rows([[str(item.get(col, "")) for col in SCRIPT_HEADERS] for item in script_new])
 
-def create_standalone_node(label, text_content, gen_type, x, y, config, ref_node_info=None):
+def create_image_node(label, text_content, x, y, config, ref_node_info=None):
+    """创建文生图节点 (remote-imageGenerationNode)"""
     gen_id = str(uuid.uuid4())
     try: model_str = json.dumps(json.loads(config['img_draft_model']), separators=(',', ':'))
     except: model_str = config['img_draft_model']
@@ -163,10 +168,17 @@ def create_standalone_node(label, text_content, gen_type, x, y, config, ref_node
         prompt_model_items = [{"type": "Write", "text": text_content}]
 
     node = {
-        "id": gen_id, "type": "remote-imageGenerationNode", "position": {"x": x, "y": y},
+        "id": gen_id,
+        "type": "remote-imageGenerationNode",
+        "position": {"x": x, "y": y},
         "data": {
-            "label": label, "prompt": final_prompt, "promptModel": [prompt_model_items],
-            "model": model_str, "size": config['img_size'], "ratio": config['img_ratio'], "other": {},
+            "label": label,
+            "prompt": final_prompt,
+            "promptModel": [prompt_model_items],
+            "model": model_str,
+            "size": config['img_size'],
+            "ratio": config['img_ratio'],
+            "other": {},
             "handles": [
                 {"id": "in", "type": "target", "dataType": ["IMAGE", "STRING"], "label": "图片、文本输入"}, 
                 {"id": "image", "type": "source", "dataType": "IMAGE", "label": "图片输出"}
@@ -174,6 +186,28 @@ def create_standalone_node(label, text_content, gen_type, x, y, config, ref_node
         }
     }
     return node, edge_to_add
+
+def create_text_node(label, text_content, x, y):
+    """创建纯文本节点 (remote-textNode)，用于背景动画、人物动态、标题文字"""
+    node_id = str(uuid.uuid4())
+    return {
+        "id": node_id,
+        "type": "remote-textNode",
+        "position": {"x": x, "y": y},
+        "data": {
+            "label": label,
+            "text": text_content,
+            "prompt": text_content,
+            "promptModel": [[{"type": "Write", "text": text_content}]],
+            "outputs": {
+                "text": {"dataType": "STRING", "value": text_content}
+            },
+            "other": {},
+            "handles": [
+                {"id": "text", "type": "source", "dataType": "STRING", "label": "文本输出"}
+            ]
+        }
+    }
 
 def generate_toonflow_json(config, export_type="settings"):
     gcp_key_str = get_secret("GCP_SA_KEY", "")
@@ -199,10 +233,10 @@ def generate_toonflow_json(config, export_type="settings"):
                 node_label = f"{prefix}-场景{i}"
                 node_x = -280 + (i - 1) * 420
                 if i == 1:
-                    node, edge = create_standalone_node(node_label, prompt, "image", node_x, current_y, config, None)
+                    node, edge = create_image_node(node_label, prompt, node_x, current_y, config, None)
                     scene1_ref = {"id": node["id"], "label": node_label}
                 else:
-                    node, edge = create_standalone_node(node_label, prompt, "image", node_x, current_y, config, scene1_ref)
+                    node, edge = create_image_node(node_label, prompt, node_x, current_y, config, scene1_ref)
                 project["nodes"].append(node)
                 if edge: project["edges"].append(edge)
             if has_any_scene: current_y += 420
@@ -216,38 +250,42 @@ def generate_toonflow_json(config, export_type="settings"):
             clip_prefix = f"片段{seq}-{clip_title}" if clip_title else f"片段{seq}"
             node_x, has_clip_node = -280, False
             
-            bg_prompt = str(row.get("背景图", "")).strip()
-            if bg_prompt:
-                node, _ = create_standalone_node(f"{clip_prefix}-背景图", bg_prompt, "image", node_x, current_y, config)
-                project["nodes"].append(node)
-                node_x += 420
-                has_clip_node = True
-                
-            char_prompt = str(row.get("人物", "")).strip()
-            if char_prompt:
-                node, _ = create_standalone_node(f"{clip_prefix}-人物", char_prompt, "image", node_x, current_y, config)
-                project["nodes"].append(node)
-                node_x += 420
-                has_clip_node = True
+            # 1. 文生图节点：背景图、人物
+            for img_col in ["背景图", "人物"]:
+                val = str(row.get(img_col, "")).strip()
+                if val:
+                    node, _ = create_image_node(f"{clip_prefix}-{img_col}", val, node_x, current_y, config)
+                    project["nodes"].append(node)
+                    node_x += 420
+                    has_clip_node = True
+            
+            # 2. 文本节点：背景动画、人物动态、标题文字（不为空则导出）
+            for txt_col in ["背景动画", "人物动态", "标题文字"]:
+                val = str(row.get(txt_col, "")).strip()
+                if val:
+                    node = create_text_node(f"{clip_prefix}-{txt_col}", val, node_x, current_y)
+                    project["nodes"].append(node)
+                    node_x += 420
+                    has_clip_node = True
                 
             if has_clip_node: current_y += 420
 
     return json.dumps(project, ensure_ascii=False, indent=2), len(project["nodes"])
 
 # ==============================================================================
-# 🖥️ 【UI 界面渲染区（自上而下单栏流式布局）】
+# 📌 【左侧边栏：Google 表格直达与实时预览】
+# ==============================================================================
+with st.sidebar:
+    st.header("📊 Google 表格数据")
+    st.link_button("🔗 打开 Google 表格编辑", SHEET_EDIT_URL, use_container_width=True)
+    with st.expander("📋 表格数据预览（展开查看）", expanded=True):
+        st.components.v1.iframe(SHEET_EMBED_URL, height=580, scrolling=True)
+
+# ==============================================================================
+# 🖥️ 【主界面渲染区（宽屏自上而下流式布局）】
 # ==============================================================================
 st.title("🎬 Auto Video Studio")
-
-# 顶部：Google 表格直达链接 + 可折叠小预览
-top_c1, top_c2 = st.columns([2.5, 1])
-with top_c1:
-    st.caption("工作流：AI 解析写入表格 → 导出 Settings 定妆/定景 → 确认后导出 Script 分镜")
-with top_c2:
-    st.link_button("🔗 打开 Google 表格", SHEET_EDIT_URL, use_container_width=True)
-
-with st.expander("📊 查看 Google 表格数据预览（点击展开 / 收起）", expanded=False):
-    st.components.v1.iframe(SHEET_EMBED_URL, height=380, scrolling=True)
+st.caption("工作流：AI 解析写入 Google 表格 → 独立导出 Settings（定妆/定景） → 独立导出 Script（分镜画面与动态文本）")
 
 st.divider()
 
@@ -273,11 +311,11 @@ with st.expander("📝 查看 / 微调当前 Prompt 内容", expanded=False):
     current_prompt_text = st.text_area(
         "Prompt 内容",
         value=available_prompts.get(selected_prompt_name, "") if isinstance(available_prompts, dict) else "",
-        height=160,
+        height=180,
         label_visibility="collapsed"
     )
 
-raw_story = st.text_area("输入草稿文案", height=140, placeholder="在此粘贴故事草稿或分镜文案...")
+raw_story = st.text_area("输入草稿文案", height=160, placeholder="在此粘贴故事草稿或分镜文案...")
 
 if st.button("🚀 解析并写入 Google 表格", type="primary", use_container_width=True):
     if raw_story.strip():
@@ -291,15 +329,14 @@ if st.button("🚀 解析并写入 Google 表格", type="primary", use_container
 st.divider()
 
 # ------------------------------------------------------------------------------
-# 第二部分：导出视觉工程 JSON (Toonflow) —— 独立分步导出
+# 第二部分：导出视觉工程 JSON (Toonflow) —— 独立导出 Settings 与 Script
 # ------------------------------------------------------------------------------
 st.subheader("2. 导出视觉工程 JSON (Toonflow)")
 
-# 统一节点参数（模型、比例、分辨率）
 c_m, c_r, c_s = st.columns([2.2, 1, 1])
 with c_m:
     chosen_tf_model = st.selectbox(
-        "默认生图模型（写入节点）",
+        "默认生图模型（写入文生图节点）",
         list(TOONFLOW_IMAGE_MODELS.keys()),
         format_func=lambda k: TOONFLOW_IMAGE_MODELS[k]
     )
@@ -317,9 +354,10 @@ if chosen_tf_model == "CUSTOM":
 else:
     st.session_state.node_config['img_draft_model'] = chosen_tf_model
 
-st.markdown("#### 第一步：导出 Settings 工程（定妆 / 定景）")
-st.caption("先导出 Settings 到 Toonflow 生成人物/场景设定图，确认角色与场景一致后再进行第二步。")
+st.write("")
 
+# 独立导出模块一：Settings
+st.markdown("#### ① 导出 Settings 工程（定妆 / 定景文生图节点）")
 if st.button("📦 生成 Settings 工程 JSON", use_container_width=True):
     json_str, node_cnt = generate_toonflow_json(st.session_state.node_config, "settings")
     st.session_state["export_settings_json"] = json_str
@@ -336,13 +374,11 @@ if "export_settings_json" in st.session_state:
         use_container_width=True,
     )
 
-st.markdown("#### 第二步：导出 Script 工程（分镜画面）")
-settings_ready = st.checkbox(
-    "✅ 我已确认 Settings（定妆 / 定景）已准备就绪，可以生成分镜工程",
-    value=False
-)
+st.write("")
 
-if st.button("🎬 生成 Script 工程 JSON", disabled=not settings_ready, use_container_width=True):
+# 独立导出模块二：Script
+st.markdown("#### ② 导出 Script 工程（文生图：背景图/人物 ｜ 文本：背景动画/人物动态/标题文字）")
+if st.button("🎬 生成 Script 工程 JSON", use_container_width=True):
     json_str, node_cnt = generate_toonflow_json(st.session_state.node_config, "script")
     st.session_state["export_script_json"] = json_str
     st.session_state["export_script_cnt"] = node_cnt

@@ -36,6 +36,23 @@ def get_secret(key, default=""):
     try: return st.secrets[key] if key in st.secrets else os.getenv(key, default)
     except Exception: return os.getenv(key, default)
 
+def safe_get_sheet_records(ws):
+    """安全读取工作表为字典列表，自动忽略空表头列与空行"""
+    all_values = ws.get_all_values()
+    if not all_values or len(all_values) < 2:
+        return []
+    headers = [h.strip() for h in all_values[0]]
+    records = []
+    for row in all_values[1:]:
+        if not any(cell.strip() for cell in row):
+            continue
+        item = {}
+        for idx, h in enumerate(headers):
+            if h and h not in item:
+                item[h] = row[idx] if idx < len(row) else ""
+        records.append(item)
+    return records
+
 @st.cache_data(ttl=60)
 def fetch_prompts_from_sheet():
     gcp_key_str = get_secret("GCP_SA_KEY", "")
@@ -52,6 +69,25 @@ def fetch_prompts_from_sheet():
                 prompts[row[0].strip()] = row[1].strip()
         return prompts if prompts else {"默认": "请在 prompt 表格中添加数据。"}
     except Exception as e: return {"读取错误": f"读取 prompt 表格失败: {e}"}
+
+@st.cache_data(ttl=10)
+def fetch_sheet_tables():
+    """读取 Settings 和 Script 两张表的最新数据"""
+    gcp_key_str = get_secret("GCP_SA_KEY", "")
+    if not gcp_key_str:
+        raise RuntimeError("未配置 GCP_SA_KEY")
+    creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_url(SHEET_EDIT_URL)
+    try:
+        settings_records = safe_get_sheet_records(sh.worksheet(TAB_NAME_SETTINGS))
+    except Exception:
+        settings_records = []
+    try:
+        script_records = safe_get_sheet_records(sh.worksheet(TAB_NAME_SCRIPT))
+    except Exception:
+        script_records = []
+    return settings_records, script_records
 
 # ==============================================================================
 # 🎨 【Streamlit 样式初始化】
@@ -114,7 +150,7 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(sheet_url)
     st.toast("⏳ 正在请求 AI 解析...")
-    try: current_settings = sh.worksheet(TAB_NAME_SETTINGS).get_all_records()
+    try: current_settings = safe_get_sheet_records(sh.worksheet(TAB_NAME_SETTINGS))
     except Exception: current_settings = []
     
     context_str = json.dumps(current_settings, ensure_ascii=False) if current_settings else "目前为空"
@@ -137,6 +173,7 @@ def process_and_append_sheets(raw_text, selected_prompt, model_name, sheet_url):
             ws_script = sh.add_worksheet(title=TAB_NAME_SCRIPT, rows="100", cols="20")
             ws_script.append_row(SCRIPT_HEADERS)
         ws_script.append_rows([[str(item.get(col, "")) for col in SCRIPT_HEADERS] for item in script_new])
+    fetch_sheet_tables.clear()
 
 def create_image_node(label, text_content, x, y, config, ref_node_info=None):
     """创建文生图节点 (remote-imageGenerationNode)"""
@@ -209,17 +246,11 @@ def create_text_node(label, text_content, x, y):
         }
     }
 
-def generate_toonflow_json(config, export_type="settings"):
-    gcp_key_str = get_secret("GCP_SA_KEY", "")
-    creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_url(SHEET_EDIT_URL)
+def build_toonflow_json(config, settings_records, script_records, export_type="settings"):
     project = {"toonflowCanvas": True, "nodes": [], "edges": [], "viewport": {"x": 450, "y": 450, "zoom": 0.5}}
     current_y = -700
     
     if export_type == "settings":
-        try: settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records()
-        except: settings_records = []
         for row in settings_records:
             item_type, name = str(row.get("类型", "")).strip(), str(row.get("名称", "")).strip()
             if not name: continue
@@ -242,35 +273,32 @@ def generate_toonflow_json(config, export_type="settings"):
             if has_any_scene: current_y += 420
 
     elif export_type == "script":
-        try: script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
-        except: script_records = []
         for idx, row in enumerate(script_records, start=1):
-            seq = str(row.get("序号", idx)).strip()
-            clip_title = str(row.get("片段", "")).strip()
-            clip_prefix = f"片段{seq}-{clip_title}" if clip_title else f"片段{seq}"
+            raw_seq = str(row.get("序号", "")).strip() or str(idx)
+            seq_prefix = raw_seq if raw_seq.startswith("片段") else f"片段{raw_seq}"
             node_x, has_clip_node = -280, False
             
-            # 1. 文生图节点：直接命名为「背景图」、「人物」
+            # 1. 文生图节点：片段序号 + 列名（如 片段1-背景图、片段1-人物）
             for img_col in ["背景图", "人物"]:
                 val = str(row.get(img_col, "")).strip()
                 if val:
-                    node, _ = create_image_node(img_col, val, node_x, current_y, config)
+                    node, _ = create_image_node(f"{seq_prefix}-{img_col}", val, node_x, current_y, config)
                     project["nodes"].append(node)
                     node_x += 420
                     has_clip_node = True
             
-            # 2. 文本节点：背景动画、人物动态、标题文字（锚定片段和序号，不为空则导出）
+            # 2. 文本节点：片段序号 + 列名（如 片段1-背景动画、片段1-人物动态、片段1-标题文字）
             for txt_col in ["背景动画", "人物动态", "标题文字"]:
                 val = str(row.get(txt_col, "")).strip()
                 if val:
-                    node = create_text_node(f"{clip_prefix}-{txt_col}", val, node_x, current_y)
+                    node = create_text_node(f"{seq_prefix}-{txt_col}", val, node_x, current_y)
                     project["nodes"].append(node)
                     node_x += 420
                     has_clip_node = True
                 
             if has_clip_node: current_y += 420
 
-    return json.dumps(project, ensure_ascii=False, indent=2)
+    return json.dumps(project, ensure_ascii=False, indent=2), len(project["nodes"])
 
 # ==============================================================================
 # 📌 【左侧边栏：Google 表格直达与实时预览】
@@ -329,7 +357,13 @@ st.divider()
 # ------------------------------------------------------------------------------
 # 第二部分：导出 JSON (Toonflow) —— 单按钮一键生成并下载
 # ------------------------------------------------------------------------------
-st.subheader("2. 导出 JSON (Toonflow)")
+h_c1, h_c2 = st.columns([4, 1])
+with h_c1:
+    st.subheader("2. 导出 JSON (Toonflow)")
+with h_c2:
+    if st.button("🔄 同步最新表格", use_container_width=True):
+        fetch_sheet_tables.clear()
+        st.rerun()
 
 c_m, c_r, c_s = st.columns([2.2, 1, 1])
 with c_m:
@@ -354,25 +388,47 @@ else:
 
 st.write("")
 
-btn_c1, btn_c2 = st.columns(2, gap="medium")
-with btn_c1:
-    st.download_button(
-        label="⬇️ 导出 Settings（定妆 / 定景）",
-        data=lambda: generate_toonflow_json(st.session_state.node_config, "settings"),
-        file_name=f"Toonflow_Settings_{int(time.time())}.json",
-        mime="application/json",
-        type="primary",
-        use_container_width=True,
-        key="dl_settings_json",
-    )
+# 预先生成最新 JSON（单按钮点击即可完成生成+下载）
+settings_json_data, settings_node_cnt = "", 0
+script_json_data, script_node_cnt = "", 0
+load_error = ""
 
-with btn_c2:
-    st.download_button(
-        label="⬇️ 导出 Script（分镜）",
-        data=lambda: generate_toonflow_json(st.session_state.node_config, "script"),
-        file_name=f"Toonflow_Script_{int(time.time())}.json",
-        mime="application/json",
-        type="primary",
-        use_container_width=True,
-        key="dl_script_json",
+try:
+    s_records, sc_records = fetch_sheet_tables()
+    settings_json_data, settings_node_cnt = build_toonflow_json(
+        st.session_state.node_config, s_records, sc_records, "settings"
     )
+    script_json_data, script_node_cnt = build_toonflow_json(
+        st.session_state.node_config, s_records, sc_records, "script"
+    )
+except Exception as e:
+    load_error = str(e)
+
+if load_error:
+    st.error(f"表格读取异常：{load_error}")
+else:
+    ts_str = time.strftime("%Y%m%d_%H%M%S")
+    btn_c1, btn_c2 = st.columns(2, gap="medium")
+    with btn_c1:
+        st.download_button(
+            label=f"⬇️ 导出 Settings（定妆 / 定景 · {settings_node_cnt} 节点）",
+            data=settings_json_data,
+            file_name=f"Toonflow_Settings_{ts_str}.json",
+            mime="application/json",
+            type="primary",
+            use_container_width=True,
+            disabled=(settings_node_cnt == 0),
+            key="dl_settings_json",
+        )
+
+    with btn_c2:
+        st.download_button(
+            label=f"⬇️ 导出 Script（分镜 · {script_node_cnt} 节点）",
+            data=script_json_data,
+            file_name=f"Toonflow_Script_{ts_str}.json",
+            mime="application/json",
+            type="primary",
+            use_container_width=True,
+            disabled=(script_node_cnt == 0),
+            key="dl_script_json",
+        )

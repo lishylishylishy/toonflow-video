@@ -10,8 +10,63 @@ from google.oauth2.service_account import Credentials
 import gspread
 import requests
 import streamlit as st
-
 st.set_page_config(page_title="Gemini AI 配音控制台", page_icon="🎙️", layout="wide")
+
+import pandas as pd
+def _cell_a1(row: int, col: int) -> str:
+    letters = ""
+    while col > 0:
+        col, rem = divmod(col - 1, 26)
+        letters = chr(65 + rem) + letters
+    return f"{letters}{row}"
+
+def update_segment_durations(group_items: list[dict], wav_bytes: bytes):
+    """测量生成音频的真实秒数，只更新【片段时长】一列（同步内存 + 写回 Google 表格）"""
+    real_sec = round(get_wav_duration(wav_bytes), 2)
+    if real_sec <= 0 or "script_data" not in st.session_state:
+        return
+
+    # 1. 计算每一行应填的时长（单行填 100% 真实时长；多行合并按字数比例分摊总时长）
+    if len(group_items) == 1:
+        durations = [real_sec]
+    else:
+        weights = [max(1, len(str(it["text"]).strip())) for it in group_items]
+        total_w = sum(weights)
+        durations = [round(real_sec * (w / total_w), 2) for w in weights]
+
+    # 2. 只修改内存数据里的「片段时长」字段，其他列原封不动
+    for it, dur in zip(group_items, durations):
+        st.session_state.script_data[it["raw_idx"]]["片段时长"] = dur
+
+    # 同步给 pages/sfx.py
+    st.session_state["shared_script_df"] = pd.DataFrame(st.session_state.script_data)
+
+    # 3. 精准写回 Google 表格的「片段时长」这一列（不碰其他任何列）
+    try:
+        sheet_url = get_config(["sheet_url", "SHEET_URL", "SHEET_EDIT_URL"], DEFAULT_SHEET_URL)
+        gcp_key = get_config(["GCP_SA_KEY", "gcp_sa_key"])
+        creds_info = json.loads(gcp_key) if isinstance(gcp_key, str) else dict(gcp_key)
+        creds = Credentials.from_service_account_info(
+            creds_info,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ],
+        )
+        ws = gspread.authorize(creds).open_by_url(sheet_url).worksheet(TAB_NAME_SCRIPT)
+        headers = ws.row_values(1)
+        if "片段时长" in headers:
+            dur_col = headers.index("片段时长") + 1
+            updates = [
+                {
+                    "range": _cell_a1(it["raw_idx"] + 2, dur_col),  # 第1行是表头，数据从第2行开始
+                    "values": [[dur]],
+                }
+                for it, dur in zip(group_items, durations)
+            ]
+            ws.batch_update(updates)
+    except Exception as e:
+        st.warning(f"音频已生成，但同步写入 Google 表格「片段时长」失败：{e}")
 
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1Y8YOEl5G2HV4C3WLZz9ttEEoByuWKGLqh_nmWvcb-_M/edit"
 TAB_NAME_SCRIPT = "toonflow-story-Script"
@@ -46,19 +101,19 @@ GEMINI_VOICES = {
     "Sadachbia（男·生动跳脱 / 搞笑担当）": "Sadachbia",
     "Sadaltager（男·博学老成 / 师尊长老）": "Sadaltager",
     # 女声 (13款)
-    "Kore（女·清冷坚定 / 独立大女主）": "Kore",
-    "Aoede（女·温柔知性 / 情感叙事）": "Aoede",
-    "Leda（女·甜美灵动 / 少女闺蜜）": "Leda",
-    "Zephyr（女·明快自然 / 现代女主）": "Zephyr",
-    "Gacrux（女·成熟御姐 / 霸气女总裁）": "Gacrux",
-    "Vindemiatrix（女·柔美细腻 / 虐恋白月光）": "Vindemiatrix",
-    "Achernar（女·轻柔温婉 / 乖巧甜妹）": "Achernar",
-    "Despina（女·丝滑优雅 / 豪门千金）": "Despina",
-    "Erinome（女·清晰干练 / 职场精英）": "Erinome",
-    "Callirrhoe（女·随和亲切 / 邻家姐姐）": "Callirrhoe",
-    "Autonoe（女·明亮活泼 / 元气少女）": "Autonoe",
-    "Laomedeia（女·高亢娇俏 / 刁蛮千金）": "Laomedeia",
-    "Sulafat（女·温暖包容 / 贤惠母性）": "Sulafat",
+    "Kore（女·坚定）": "Kore",
+    "Aoede（女·知性）": "Aoede",
+    "Leda（女·闺蜜）": "Leda",
+    "Zephyr（女·自然）": "Zephyr",
+    "Gacrux（女·成熟）": "Gacrux",
+    "Vindemiatrix（女·白月光）": "Vindemiatrix",
+    "Achernar（女·温婉）": "Achernar",
+    "Despina（女·豪门）": "Despina",
+    "Erinome（女·干练）": "Erinome",
+    "Callirrhoe（女·邻家）": "Callirrhoe",
+    "Autonoe（女·少女）": "Autonoe",
+    "Laomedeia（女·刁蛮）": "Laomedeia",
+    "Sulafat（女·贤惠）": "Sulafat",
 }
 
 
@@ -266,9 +321,10 @@ with col_b:
             st.success("已读取最新脚本！")
 
 if "script_data" in st.session_state:
+if "script_data" in st.session_state:
     dubbing_lines = [
-        row
-        for row in st.session_state.script_data
+        (raw_idx, row)
+        for raw_idx, row in enumerate(st.session_state.script_data)
         if str(row.get("配音文字", "")).strip()
     ]
 
@@ -280,7 +336,7 @@ if "script_data" in st.session_state:
         unique_chars = list(
             dict.fromkeys([
                 str(row.get("配音人物", "")).strip() or "旁白"
-                for row in dubbing_lines
+                for _, row in dubbing_lines
             ])
         )
         voice_labels = list(GEMINI_VOICES.keys())
@@ -308,11 +364,12 @@ if "script_data" in st.session_state:
 
         # 读取界面上可能微调过的台词和语气，并按连续同角色自动分组
         all_segments = []
-        for idx, row in enumerate(dubbing_lines):
+        for idx, (raw_idx, row) in enumerate(dubbing_lines):
             seq = str(row.get("序号", idx + 1)).strip()
             char = str(row.get("配音人物", "")).strip() or "旁白"
             all_segments.append({
                 "idx": idx,
+                "raw_idx": raw_idx,
                 "seq": seq,
                 "char": char,
                 "text": st.session_state.get(
@@ -356,6 +413,7 @@ if "script_data" in st.session_state:
                             "filename": grp["filename"],
                             "bytes": wav_data,
                         }
+                        update_segment_durations(grp["items"], wav_data)
                     else:
                         st.error(f"{grp['title']} 生成失败：{wav_data}")
 
@@ -439,6 +497,7 @@ if "script_data" in st.session_state:
                             latest_items = [
                                 {
                                     "idx": it["idx"],
+                                    "raw_idx": it["raw_idx"],
                                     "seq": it["seq"],
                                     "char": it["char"],
                                     "tone": st.session_state.get(
@@ -464,6 +523,7 @@ if "script_data" in st.session_state:
                                         "filename": grp["filename"],
                                         "bytes": wav_data,
                                     }
+                                    update_segment_durations(latest_items, wav_data)
                                     st.rerun()
                                 else:
                                     st.error(f"生成失败: {wav_data}")

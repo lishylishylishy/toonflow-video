@@ -1,6 +1,6 @@
 import streamlit as st
 
-st.set_page_config(page_title="Auto Video Studio", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="Auto Video Studio", page_icon="🎬", layout="wide", initial_sidebar_state="expanded")
 
 import requests, json, time, os, uuid, re
 import urllib.parse
@@ -53,7 +53,7 @@ def fetch_prompts_from_sheet():
 # ==============================================================================
 st.markdown("""
     <style>
-        #MainMenu, footer { visibility: hidden; }
+        footer { visibility: hidden; }
         header[data-testid="stHeader"] { background-color: transparent !important; }
         .block-container { padding-top: 2rem !important; padding-bottom: 1rem !important; }
         iframe { border-radius: 8px; border: 1px solid #e0e0e0; }

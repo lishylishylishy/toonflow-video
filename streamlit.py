@@ -1,7 +1,6 @@
 import streamlit as st
 
-st.set_page_config(page_title="Auto Video Studio", page_icon="🎬", layout="wide", initial_sidebar_state="expanded")
-st.sidebar.success("侧边栏已激活")
+st.set_page_config(page_title="Auto Video Studio", page_icon="🎬", layout="centered", initial_sidebar_state="collapsed")
 import requests, json, time, os, uuid, re
 import urllib.parse
 import gspread
@@ -25,6 +24,12 @@ RECOMMENDED_MODELS = {
     "gemini-3.5-flash-lite": "⚡ gemini-3.5-flash-lite (推荐！)",
     "gemini-3.1-flash-lite": "⚡ gemini-3.1-flash-lite (额度大！)",
     "gemini-3.8-flash": "🧠 gemini-3.8-flash (最新性能王！)"
+}
+
+TOONFLOW_IMAGE_MODELS = {
+    '["modelscopeImageProvider", "Tongyi-MAI/Z-Image-Turbo"]': "⚡ Z-Image-Turbo (魔搭 · 快速出图)",
+    '["modelscopeImageProvider", "Qwen/Qwen-Image-2512"]': "🎨 Qwen-Image-2512 (魔搭 · 高清精绘)",
+    "CUSTOM": "✏️ 自定义模型配置字符串..."
 }
 
 def get_secret(key, default=""):
@@ -55,9 +60,8 @@ st.markdown("""
     <style>
         footer { visibility: hidden; }
         header[data-testid="stHeader"] { background-color: transparent !important; }
-        .block-container { padding-top: 2rem !important; padding-bottom: 1rem !important; }
+        .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important; }
         iframe { border-radius: 8px; border: 1px solid #e0e0e0; }
-        div[data-testid="stForm"] { border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -65,9 +69,9 @@ available_prompts = fetch_prompts_from_sheet()
 
 if 'node_config' not in st.session_state:
     st.session_state.node_config = {
-        'text_model':'["modelscopeImageProvider", "Qwen/Qwen3.8-27B"]',
-        'img_draft_model':'["modelscopeImageProvider", "Tongyi-MAI/Z-Image-Turbo"]',
-        'img_final_model':'["modelscopeImageProvider", "Qwen/Qwen-Image-2512"]',
+        'text_model': '["modelscopeImageProvider", "Qwen/Qwen3.8-27B"]',
+        'img_draft_model': '["modelscopeImageProvider", "Tongyi-MAI/Z-Image-Turbo"]',
+        'img_final_model': '["modelscopeImageProvider", "Qwen/Qwen-Image-2512"]',
         'img_size': "1K",
         'img_ratio': "9:16",
         'img_count': 1
@@ -171,7 +175,7 @@ def create_standalone_node(label, text_content, gen_type, x, y, config, ref_node
     }
     return node, edge_to_add
 
-def generate_toonflow_json(config, export_type="all"):
+def generate_toonflow_json(config, export_type="settings"):
     gcp_key_str = get_secret("GCP_SA_KEY", "")
     creds = Credentials.from_service_account_info(json.loads(gcp_key_str), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
     gc = gspread.authorize(creds)
@@ -179,7 +183,7 @@ def generate_toonflow_json(config, export_type="all"):
     project = {"toonflowCanvas": True, "nodes": [], "edges": [], "viewport": {"x": 450, "y": 450, "zoom": 0.5}}
     current_y = -700
     
-    if export_type in ["settings", "all"]:
+    if export_type == "settings":
         try: settings_records = sh.worksheet(TAB_NAME_SETTINGS).get_all_records()
         except: settings_records = []
         for row in settings_records:
@@ -203,7 +207,7 @@ def generate_toonflow_json(config, export_type="all"):
                 if edge: project["edges"].append(edge)
             if has_any_scene: current_y += 420
 
-    if export_type in ["script", "all"]:
+    elif export_type == "script":
         try: script_records = sh.worksheet(TAB_NAME_SCRIPT).get_all_records()
         except: script_records = []
         for idx, row in enumerate(script_records, start=1):
@@ -227,42 +231,129 @@ def generate_toonflow_json(config, export_type="all"):
                 has_clip_node = True
                 
             if has_clip_node: current_y += 420
-    return json.dumps(project, ensure_ascii=False, indent=2)
+
+    return json.dumps(project, ensure_ascii=False, indent=2), len(project["nodes"])
 
 # ==============================================================================
-# 🖥️ 【UI 界面渲染区】
+# 🖥️ 【UI 界面渲染区（自上而下单栏流式布局）】
 # ==============================================================================
 st.title("🎬 Auto Video Studio")
 
-col1, col2 = st.columns([1, 1.5], gap="large")
+# 顶部：Google 表格直达链接 + 可折叠小预览
+top_c1, top_c2 = st.columns([2.5, 1])
+with top_c1:
+    st.caption("工作流：AI 解析写入表格 → 导出 Settings 定妆/定景 → 确认后导出 Script 分镜")
+with top_c2:
+    st.link_button("🔗 打开 Google 表格", SHEET_EDIT_URL, use_container_width=True)
 
-with col1:
-    st.subheader("1. AI 解析与写入")
-    selected_prompt_name = st.selectbox("选择 Prompt", list(available_prompts.keys()) if isinstance(available_prompts, dict) else [])
-    current_prompt_text = st.text_area("当前 Prompt", value=available_prompts.get(selected_prompt_name, "") if isinstance(available_prompts, dict) else "")
-    selected_model = st.selectbox("选择模型", list(RECOMMENDED_MODELS.keys()), format_func=lambda k: RECOMMENDED_MODELS[k])
-    raw_story = st.text_area("输入草稿文案", height=150)
-    
-    if st.button("🚀 解析并写入", type="primary", use_container_width=True):
-        if raw_story.strip():
-            process_and_append_sheets(raw_story, current_prompt_text, selected_model, SHEET_EDIT_URL)
-            st.success("✅ 写入成功！")
-            time.sleep(1)
-            st.rerun()
+with st.expander("📊 查看 Google 表格数据预览（点击展开 / 收起）", expanded=False):
+    st.components.v1.iframe(SHEET_EMBED_URL, height=380, scrolling=True)
 
-    st.divider()
-    st.subheader("2. 导出视觉工程 JSON (Toonflow)")
-    c1, c2 = st.columns(2)
-    with c1: st.session_state.node_config['img_ratio'] = st.selectbox("比例", ["9:16", "16:9", "1:1", "3:4", "4:3"])
-    with c2: st.session_state.node_config['img_size'] = st.selectbox("分辨率", ["1K", "2K"])
+st.divider()
 
-    if st.button("生成全剧 JSON", use_container_width=True):
-        st.session_state["export_json"] = generate_toonflow_json(st.session_state.node_config, "all")
-        st.session_state["export_name"] = f"Toonflow_Visual_{int(time.time())}.json"
+# ------------------------------------------------------------------------------
+# 第一部分：AI 解析与写入
+# ------------------------------------------------------------------------------
+st.subheader("1. AI 解析与写入")
 
-    if "export_json" in st.session_state:
-        st.download_button(label="⬇️ 下载 JSON 文件", data=st.session_state["export_json"], file_name=st.session_state["export_name"], mime="application/json", type="primary", use_container_width=True)
+c_p1, c_p2 = st.columns([1.2, 1])
+with c_p1:
+    selected_prompt_name = st.selectbox(
+        "选择 Prompt 模板",
+        list(available_prompts.keys()) if isinstance(available_prompts, dict) else []
+    )
+with c_p2:
+    selected_model = st.selectbox(
+        "选择解析模型",
+        list(RECOMMENDED_MODELS.keys()),
+        format_func=lambda k: RECOMMENDED_MODELS[k]
+    )
 
-with col2:
-    st.subheader("📊 数据表预览")
-    st.components.v1.iframe(SHEET_EMBED_URL, height=700, scrolling=True)
+with st.expander("📝 查看 / 微调当前 Prompt 内容", expanded=False):
+    current_prompt_text = st.text_area(
+        "Prompt 内容",
+        value=available_prompts.get(selected_prompt_name, "") if isinstance(available_prompts, dict) else "",
+        height=160,
+        label_visibility="collapsed"
+    )
+
+raw_story = st.text_area("输入草稿文案", height=140, placeholder="在此粘贴故事草稿或分镜文案...")
+
+if st.button("🚀 解析并写入 Google 表格", type="primary", use_container_width=True):
+    if raw_story.strip():
+        process_and_append_sheets(raw_story, current_prompt_text, selected_model, SHEET_EDIT_URL)
+        st.success("✅ 解析并写入成功！")
+        time.sleep(1)
+        st.rerun()
+    else:
+        st.warning("请先输入草稿文案。")
+
+st.divider()
+
+# ------------------------------------------------------------------------------
+# 第二部分：导出视觉工程 JSON (Toonflow) —— 独立分步导出
+# ------------------------------------------------------------------------------
+st.subheader("2. 导出视觉工程 JSON (Toonflow)")
+
+# 统一节点参数（模型、比例、分辨率）
+c_m, c_r, c_s = st.columns([2.2, 1, 1])
+with c_m:
+    chosen_tf_model = st.selectbox(
+        "默认生图模型（写入节点）",
+        list(TOONFLOW_IMAGE_MODELS.keys()),
+        format_func=lambda k: TOONFLOW_IMAGE_MODELS[k]
+    )
+with c_r:
+    st.session_state.node_config['img_ratio'] = st.selectbox("画面比例", ["9:16", "16:9", "1:1", "3:4", "4:3"])
+with c_s:
+    st.session_state.node_config['img_size'] = st.selectbox("分辨率", ["1K", "2K"])
+
+if chosen_tf_model == "CUSTOM":
+    custom_model_str = st.text_input(
+        "自定义 Toonflow 模型配置（JSON 数组格式）",
+        value='["modelscopeImageProvider", "Qwen/Qwen-Image-2512"]'
+    )
+    st.session_state.node_config['img_draft_model'] = custom_model_str.strip()
+else:
+    st.session_state.node_config['img_draft_model'] = chosen_tf_model
+
+st.markdown("#### 第一步：导出 Settings 工程（定妆 / 定景）")
+st.caption("先导出 Settings 到 Toonflow 生成人物/场景设定图，确认角色与场景一致后再进行第二步。")
+
+if st.button("📦 生成 Settings 工程 JSON", use_container_width=True):
+    json_str, node_cnt = generate_toonflow_json(st.session_state.node_config, "settings")
+    st.session_state["export_settings_json"] = json_str
+    st.session_state["export_settings_cnt"] = node_cnt
+    st.session_state["export_settings_name"] = f"Toonflow_Settings_{int(time.time())}.json"
+
+if "export_settings_json" in st.session_state:
+    st.download_button(
+        label=f"⬇️ 下载 Settings JSON（共 {st.session_state['export_settings_cnt']} 个节点）",
+        data=st.session_state["export_settings_json"],
+        file_name=st.session_state["export_settings_name"],
+        mime="application/json",
+        type="primary",
+        use_container_width=True,
+    )
+
+st.markdown("#### 第二步：导出 Script 工程（分镜画面）")
+settings_ready = st.checkbox(
+    "✅ 我已确认 Settings（定妆 / 定景）已准备就绪，可以生成分镜工程",
+    value=False
+)
+
+if st.button("🎬 生成 Script 工程 JSON", disabled=not settings_ready, use_container_width=True):
+    json_str, node_cnt = generate_toonflow_json(st.session_state.node_config, "script")
+    st.session_state["export_script_json"] = json_str
+    st.session_state["export_script_cnt"] = node_cnt
+    st.session_state["export_script_name"] = f"Toonflow_Script_{int(time.time())}.json"
+
+if "export_script_json" in st.session_state:
+    st.download_button(
+        label=f"⬇️ 下载 Script JSON（共 {st.session_state['export_script_cnt']} 个节点）",
+        data=st.session_state["export_script_json"],
+        file_name=st.session_state["export_script_name"],
+        mime="application/json",
+        type="primary",
+        use_container_width=True,
+    )

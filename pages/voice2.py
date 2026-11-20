@@ -89,38 +89,29 @@ def get_mmaudio_client(hf_token: str) -> Client:
 
 
 def call_mmaudio_api(client: Client, candidate_apis: list, *args):
-    """带自动重试与安全路径提取，避免算力队列波动返回元组导致报错"""
+    """直接调用 /text_to_audio，遇到额度耗尽直接提示，不覆盖真实报错"""
     last_err = None
-    str_apis = [ep for ep in candidate_apis if isinstance(ep, str)]
     for attempt in range(3):
-        for ep in str_apis:
-            try:
-                res = client.predict(*args, api_name=ep)
-                if isinstance(res, (tuple, list)):
-                    for item in res:
-                        if isinstance(item, str) and os.path.exists(item):
-                            return item
-                        if isinstance(item, dict):
-                            p = (
-                                item.get("path")
-                                or item.get("video")
-                                or item.get("audio")
-                            )
-                            if p:
-                                return p
-                    return str(res[0])
-                if isinstance(res, dict):
-                    return (
-                        res.get("path")
-                        or res.get("video")
-                        or res.get("audio")
-                        or str(res)
-                    )
-                return res
-            except Exception as e:
-                last_err = e
-        if attempt < 2:
-            time.sleep(3)
+        try:
+            res = client.predict(*args, api_name="/text_to_audio")
+            if isinstance(res, (tuple, list)):
+                for item in res:
+                    if isinstance(item, str) and os.path.exists(item):
+                        return item
+                    if isinstance(item, dict):
+                        p = item.get("path") or item.get("video") or item.get("audio")
+                        if p:
+                            return p
+                return str(res[0])
+            if isinstance(res, dict):
+                return res.get("path") or res.get("video") or res.get("audio") or str(res)
+            return res
+        except Exception as e:
+            last_err = e
+            if "quota" in str(e).lower():
+                raise RuntimeError(f"Hugging Face 今日免费 GPU 额度已用完，请次日重置后再试或更换 HF_TOKEN（详情：{e}）")
+            if attempt < 2:
+                time.sleep(3)
     raise RuntimeError(f"MMAudio 接口调用失败: {last_err}")
 
 
